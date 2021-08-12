@@ -34,6 +34,19 @@ check_address_family() {
 
 }
 
+rxtx_speed() {
+  local rx1 tx1 rx2  tx2 rx tx
+  read rx1 < /sys/class/net/$1/statistics/rx_bytes
+  read tx1 < /sys/class/net/$1/statistics/tx_bytes
+  sleep 1
+  read rx2 < /sys/class/net/$1/statistics/rx_bytes
+  read tx2 < /sys/class/net/$1/statistics/tx_bytes
+  let rx=$rx2-$rx1
+  let tx=$tx2-$tx1
+  echo "$rx:$tx"
+}
+
+
 #Set Debug SSID
 if [ $(uci get gluon.debug_ssid_enabled 2>/dev/null||echo false) = 'true' ] ; then
 	suffix="$(uci get network.bat0.macaddr)"
@@ -68,6 +81,14 @@ if [ "$(uci get wireguard.mesh_vpn.enabled)" == "true" ] || [ "$(uci get wiregua
 		if [ "$?" -eq "0" ]; then
 			CONNECTED=1
 		fi
+	fi
+	speed=$(rxtx_speed bat0)                                                                                                                          
+        #logger -t checkuplink "bat0 speed $speed"
+	if [ "$CONNECTED" -ne "1" ]; then
+               if [ $(echo "$speed" | cut -d":" -f1) -gt 10000 ] ; then                                                               
+                      logger -t checkuplink "Incoming traffic on bat0 detected. Asume connection is not lost"              
+                      CONNECTED=1                                                                                        
+               fi
 	fi
 
 	# If we don't have a connection we try to connect
