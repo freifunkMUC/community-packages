@@ -11,6 +11,7 @@ else
 	exit
 fi
 
+# shellcheck disable=SC1091
 source /lib/gluon/gluon-mesh-wireguard-vxlan/functions.sh
 init_vars
 
