@@ -138,14 +138,14 @@ use_api_v1(){
 	PEER=$(( $(hexdump -n 4 -e '"%u"' </dev/urandom) % NUMBER_OF_PEERS + 1 ))
 
 	logger -p info -t checkuplink "Selected peer $PEER"
-	PEER_HOSTPORT="$(uci get wireguard.peer_"$PEER".endpoint)"
-	PEER_HOST="$(clean_port "$PEER_HOSTPORT")"
-	PEER_ADDRESS="$(resolve_host "$PEER_HOST")"
-	PEER_PORT="$(extract_port "$PEER_HOSTPORT")"
-	PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
+	export PEER_HOSTPORT="$(uci get wireguard.peer_"$PEER".endpoint)"
+	export PEER_HOST="$(clean_port "$PEER_HOSTPORT")"
+	export PEER_ADDRESS="$(resolve_host "$PEER_HOST")"
+	export PEER_PORT="$(extract_port "$PEER_HOSTPORT")"
+	export PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
 
-	PEER_PUBLICKEY="$(uci get wireguard.peer_"$PEER".publickey)"
-	PEER_LINKADDRESS="$(uci get wireguard.peer_"$PEER".link_address)"
+	export PEER_PUBLICKEY="$(uci get wireguard.peer_"$PEER".publickey)"
+	export PEER_LINKADDRESS="$(uci get wireguard.peer_"$PEER".link_address)"
 }
 
 use_api_v2() {
@@ -160,13 +160,13 @@ use_api_v2() {
 	fi
 
 	logger -p debug -t checkuplink "Successfully parsed wgkex v2 broker data"
-	PEER_HOST="$(echo "$data" | sed -n 1p)"
-	PEER_PORT="$(echo "$data" | sed -n 2p)"
-	PEER_PUBLICKEY="$(echo "$data" | sed -n 3p)"
-	PEER_LINKADDRESS=$(echo "$data" | sed -n 4p)
+	export PEER_HOST="$(echo "$data" | sed -n 1p)"
+	export PEER_PORT="$(echo "$data" | sed -n 2p)"
+	export PEER_PUBLICKEY="$(echo "$data" | sed -n 3p)"
+	export PEER_LINKADDRESS=$(echo "$data" | sed -n 4p)
 
-	PEER_ADDRESS="$(resolve_host "$PEER_HOST")"
-	PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
+	export PEER_ADDRESS="$(resolve_host "$PEER_HOST")"
+	export PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
 }
 
 use_api_best_gw() {
@@ -179,14 +179,14 @@ use_api_best_gw() {
 	fi
 
 	logger -p debug -t checkuplink "Successfully parsed wgkex gw broker data "
-	PEER_HOST="$(echo "$data" | sed -n 1p)"
-	PEER_PORT="$(echo "$data" | sed -n 2p)"
-	PEER_PUBLICKEY="$(echo "$data" | sed -n 3p)"
-	PEER_LINKADDRESS=$(echo "$data" | sed -n 4p)
-    PEER_SWITCH=$(echo "$data" | sed -n 5p)
+	export PEER_HOST="$(echo "$data" | sed -n 1p)"
+	export PEER_PORT="$(echo "$data" | sed -n 2p)"
+	export PEER_PUBLICKEY="$(echo "$data" | sed -n 3p)"
+	export PEER_LINKADDRESS=$(echo "$data" | sed -n 4p)
+    export PEER_SWITCH=$(echo "$data" | sed -n 5p)
 
-	PEER_ADDRESS="$(resolve_host "$PEER_HOST")"
-	PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
+	export PEER_ADDRESS="$(resolve_host "$PEER_HOST")"
+	export PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
 }
 
 set_PROTO() {
@@ -196,18 +196,18 @@ set_PROTO() {
     # returns Network Failure =4 if https exists
     # and Generic Error =1 if no ssl lib available
     if [ "$ret" -eq 1 ]; then
-        PROTO=http
+        export PROTO=http
     else
-        PROTO=https
+        export PROTO=https
     fi
 }
 
 init_vars() {
     set_PROTO
     # Remove API path suffix if still present in config
-    WGKEX_BROKER_BASE_PATH="$(get_site_string mesh_vpn.wireguard.broker | sed 's|/api/v1/wg/key/exchange||')"
+    export WGKEX_BROKER_BASE_PATH="$(get_site_string mesh_vpn.wireguard.broker | sed 's|/api/v1/wg/key/exchange||')"
 
-    PUBLICKEY=$(uci get wireguard.mesh_vpn.privatekey | wg pubkey)
-    SEGMENT=$(uci get gluon.core.domain)
-    MESH_VPN_IFACE=$(get_site_string mesh_vpn.wireguard.iface)
+    export PUBLICKEY=$(uci get wireguard.mesh_vpn.privatekey | wg pubkey)
+    export SEGMENT=$(uci get gluon.core.domain)
+    export MESH_VPN_IFACE=$(get_site_string mesh_vpn.wireguard.iface)
 }
