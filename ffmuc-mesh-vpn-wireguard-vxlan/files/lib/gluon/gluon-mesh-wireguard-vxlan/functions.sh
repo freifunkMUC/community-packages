@@ -255,7 +255,8 @@ check_wireguardkey() {
     then
         uci set wireguard.mesh_vpn.privatekey="$(wg genkey)"
         uci commit wireguard
-fi}
+fi
+}
 
 setup_connection() {
     # Bring up the wireguard interface
