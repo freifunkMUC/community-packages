@@ -25,6 +25,8 @@ if [ "$PEER_SWITCH" = "True" ]; then
         logger -p info "Switch: $PEER_SWITCH; One the best GW($PEER_HOST) at the moment $CURRENT_PEER_PUBLICKEY / $PEER_PUBLICKEY"
     else
         logger -p info "Connect to best GW($PEER_HOST) ;)"
+        # remove wg_mesh_vpn
+        ip link del wg_mesh_vpn
     fi
 else
     if [ "$CURRENT_PEER_PUBLICKEY" = "$PEER_PUBLICKEY" ]; then
