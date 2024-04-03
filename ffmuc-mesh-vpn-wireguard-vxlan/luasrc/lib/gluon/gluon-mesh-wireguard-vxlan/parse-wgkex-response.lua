@@ -2,9 +2,11 @@ local json = require 'jsonc'
 
 local input = assert(arg[1], "Malformed JSON response, no data provided")
 local data = assert(json.parse(input), "Malformed JSON response, wrong JSON format")
+local version = assert(arg[2], "Malformed Version, no data provided")
+
 
 -- v1
-if data.Message == "OK" then
+if (version == "v1") and (data.Message == "OK") then
         return
 end
 
@@ -20,3 +22,9 @@ print(address)
 print(port)
 print(publicKey)
 print(allowedIPs1)
+
+if (version == "best-gw") then
+        --local switch = assert(data.Endpoint.switch, "Malformed JSON response, missing required value: AllowedIPs1")
+        --print(switch)
+        print(true)
+end
