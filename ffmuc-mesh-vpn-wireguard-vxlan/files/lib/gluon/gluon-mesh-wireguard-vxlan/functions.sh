@@ -202,7 +202,7 @@ is_connected() {
 	return 1 # false
 }
 
-check_NTP() [
+check_NTP() {
 	NTP_SERVERS=$(uci get system.ntp.server)
 	NTP_SERVERS_ADDRS=""
 
@@ -232,7 +232,7 @@ check_NTP() [
 		logger -p err -t checkuplink "Unable to establish NTP connection to ${NTP_SERVERS}."
 		exit 3
 	fi
-]
+}
 
 check_mesh_vpn() {
     export mesh_vpn_enabled="$(uci get wireguard.mesh_vpn.enabled)"
