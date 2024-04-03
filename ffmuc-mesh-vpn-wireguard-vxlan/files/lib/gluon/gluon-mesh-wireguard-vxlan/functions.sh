@@ -1,3 +1,4 @@
+# shellcheck shell="busybox sh"
 
 get_site_string() {
 	local path="$1"
