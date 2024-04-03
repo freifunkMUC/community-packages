@@ -201,6 +201,105 @@ is_connected() {
 	return 1 # false
 }
 
+check_NTP() [
+	NTP_SERVERS=$(uci get system.ntp.server)
+	NTP_SERVERS_ADDRS=""
+
+	set -o pipefail # Enable pipefail: this script does not fully support pipefail yet, but required below
+	for NTP_SERVER in $NTP_SERVERS; do
+		all_ntp_ips="$(gluon-wan nslookup "$NTP_SERVER" | grep '^Address:\? ' | sed 's/^Address:\? //')"
+		if ip -6 route show table 1 | grep -q 'default via'
+		then
+			# We need to match a few special cases for IPv6 here:
+			# - IPs with trailing "::", like 2003:a:87f:c37c::
+			# - IPs with leading "::", like ::1
+			# - IPs not starting with a digit, like fd62:f45c:4d09:180:22b3:ff::
+			# - IPs containing a zone identifier ("%"), like fe80::abcd%enp5s0
+			# As all incoming IPs are already valid IPs, we just grep for all not-IPv4s
+			selected_ntp_ips="$(echo "${all_ntp_ips}" | grep -vE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b')"
+		else
+			# We want to match IPv4s and not match RFC2765 2.1) IPs like "::ffff:255.255.255.255"
+			selected_ntp_ips="$(echo "${all_ntp_ips}" | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b')"
+		fi
+		NTP_SERVERS_ADDRS="$(for ip in $selected_ntp_ips; do echo -n "-p $ip "; done)${NTP_SERVERS_ADDRS}"
+	done
+	set +o pipefail # Disable pipefail: this script does not fully support pipefail yet
+
+	# shellcheck disable=SC2086 # otherwise ntpd cries
+	if ! force_wan_connection /usr/sbin/ntpd -n -N -S /usr/sbin/ntpd-hotplug ${NTP_SERVERS_ADDRS} -q
+	then
+		logger -p err -t checkuplink "Unable to establish NTP connection to ${NTP_SERVERS}."
+		exit 3
+	fi
+]
+
+check_mesh_vpn() {
+    export mesh_vpn_enabled="$(uci get wireguard.mesh_vpn.enabled)"
+
+    # Some legacy code seem to have used "true" instead of the canonical "1".
+    # This should be overwritten by a gluon-reconfigure (see 400-mesh-vpn-wireguard)
+    if [[ "${mesh_vpn_enabled}" != "0" ]] && [[ "${mesh_vpn_enabled}" != "1" ]]; then
+        logger -p warn -t checkuplink "Invalid value for wireguard.mesh_vpn.enabled detected: '${mesh_vpn_enabled}'. Assuming enabled."
+    fi
+
+    if [[ "${mesh_vpn_enabled}" == "0" ]]; then
+        # Stop the script if mesh_vpn is disabled
+        exit 0
+    fi
+}
+
+check_wireguardkey() {
+    # Do we already have a private-key? If not generate one
+    if ! uci -q get wireguard.mesh_vpn.privatekey > /dev/null
+    then
+        uci set wireguard.mesh_vpn.privatekey="$(wg genkey)"
+        uci commit wireguard
+fi}
+
+setup_connection() {
+    # Bring up the wireguard interface
+    ip link add dev "$MESH_VPN_IFACE" type wireguard
+    wg set "$MESH_VPN_IFACE" fwmark 1
+    uci get wireguard.mesh_vpn.privatekey | wg set "$MESH_VPN_IFACE" private-key /proc/self/fd/0
+    ip link set up dev "$MESH_VPN_IFACE"
+
+    LINKLOCAL="$(interface_linklocal)"
+
+    # Add link-address and Peer
+    ip address add "${LINKLOCAL}"/64 dev "$MESH_VPN_IFACE"
+    gluon-wan wg set "$MESH_VPN_IFACE" peer "$PEER_PUBLICKEY" persistent-keepalive 25 allowed-ips "$PEER_LINKADDRESS/128" endpoint "$PEER_ENDPOINT"
+
+    # We need to allow incoming vxlan traffic on mesh iface
+    sleep 10
+
+    RULE="-i $MESH_VPN_IFACE -m udp -p udp --dport 8472 -j ACCEPT"
+    # shellcheck disable=SC2086 # we need to split RULE here twice
+    if ! ip6tables -C INPUT $RULE
+    then
+        ip6tables -I INPUT 1 $RULE
+    fi
+
+    # Bring up VXLAN
+    if ! ip link add mesh-vpn type vxlan id "$(lua -e 'print(tonumber(require("gluon.util").domain_seed_bytes("gluon-mesh-vpn-vxlan", 3), 16))')" local "${LINKLOCAL}" remote "$PEER_LINKADDRESS" dstport 8472 dev "$MESH_VPN_IFACE"
+    then
+        logger -p err -t checkuplink "Unable to create mesh-vpn interface"
+        exit 2
+    fi
+    ip link set up dev mesh-vpn
+
+    sleep 5
+    # If we have a BATMAN_V env we need to correct the throughput value now
+    batctl hardif mesh-vpn throughput_override 1000mbit;
+
+    # Check again if connected
+    if ! is_connected; then
+        logger -p err -t checkuplink "Failed to connect to $PEER_HOST($PEER_ENDPOINT) - Please check your router firewall settings"
+        exit 4
+    fi
+
+    logger -p info -t checkuplink "Successfully connected to $PEER_HOST($PEER_ENDPOINT)"
+}
+
 set_PROTO() {
     # Push public key to broker and receive gateway data, test for https and use if supported
     ret=0
