@@ -189,6 +189,18 @@ use_api_best_gw() {
 	export PEER_ENDPOINT="$(combine_ip_port "$PEER_ADDRESS" "$PEER_PORT")"
 }
 
+is_connected() {
+	if wget "http://[$(wg  | grep fe80 | awk '{split($3,A,"/")};{print A[1]}')%$MESH_VPN_IFACE]/"  --timeout=5 -O/dev/null -q
+	then
+		GWMAC=$(batctl gwl | awk '/[*]/{print $2}')
+		if batctl ping -c 5 "$GWMAC" > /dev/null 2>&1
+		then
+			return 0 # true
+		fi
+	fi
+	return 1 # false
+}
+
 set_PROTO() {
     # Push public key to broker and receive gateway data, test for https and use if supported
     ret=0
