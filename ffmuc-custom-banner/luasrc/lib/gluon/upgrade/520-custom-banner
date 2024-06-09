@@ -8,6 +8,12 @@ local banner_path = "/etc/banner"
 local banner_backup_path = "/etc/banner.original"
 local banner_template_path = "/etc/banner.gluon"
 
+
+-- don't update the banner if customer banner is explicitly disabled
+if site.custom_banner() and site.custom_banner.enabled() == false then
+    os.exit()
+end
+
 local function file_exists(path)
     local file = io.open(path, "r")
 
@@ -68,6 +74,15 @@ new_banner = string.gsub(new_banner, "%%SITE_NAME%%", site_name)
 new_banner = string.gsub(new_banner, "%%FIRMWARE_VERSION%%", gluon_info.firmware_release)
 new_banner = string.gsub(new_banner, "%%GLUON_VERSION%%", gluon_info.gluon_version)
 new_banner = string.gsub(new_banner, "%%MODEL%%", model)
+
+if site.custom_banner.map_url() then
+    -- TODO: confirm that this is "the way" to get the map link!
+    local map_mac = string.gsub(uci:get("network", "client","macaddr"), ":", "")
+    new_banner = string.gsub(new_banner, "%%MAP_LINK%%", site.custom_banner.map_url() .. map_mac)
+else
+    -- if there is not map link in the site, strip MAP_LINK, whitespaces around it and a single final newline
+    new_banner = string.gsub(new_banner, "[ ]*%%MAP_LINK%%[ ]*\n?", "")
+end
 
 -- TODO: write this file to RAM (and regen on reboot) and link symlink it, to save space
 write_file(banner_path, new_banner)
