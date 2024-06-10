@@ -17,3 +17,9 @@ custom_banner = {
     map_url = 'https://map.ffmuc.net/#!/', -- optional (skipped by default)
 },
 ```
+
+The custom banner can also be disabled per-node:
+
+```
+uci set custom-banner.settings.enabled='0'
+```
