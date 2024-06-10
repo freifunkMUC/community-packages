@@ -9,7 +9,7 @@ include $(TOPDIR)/../package/gluon.mk
 
 define Package/$(PKG_NAME)
   TITLE:=Creates a custom SSH login banner
-  DEPENDS:=+gluon-core
+  DEPENDS:=+gluon-core +lua-jsonc
 endef
 
 $(eval $(call BuildPackageGluon,$(PKG_NAME)))

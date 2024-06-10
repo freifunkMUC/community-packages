@@ -13,8 +13,9 @@ The custom banner can optionally also be configured in the site.conf:
 
 ```lua
 custom_banner = {
-    enabled = true,                        -- optional (enabled by default)
-    map_url = 'https://map.ffmuc.net/#!/', -- optional (skipped by default)
+    enabled     = true,                         -- optional (enabled by default)
+    map_url     = 'https://map.ffmuc.net/#!/',  -- optional (skipped by default)
+    contact_url = 'https://ffmuc.net/kontakt/', -- optional (skipped by default)
 },
 ```
 
