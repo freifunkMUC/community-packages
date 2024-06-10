@@ -7,4 +7,8 @@
  %SITE_NAME% %FIRMWARE_VERSION%
  %MODEL%
  %MAP_LINK%
+ Important Commands:
+  - autoupdater (run autoupdater)
+  - logread     (show device log)
+ https://github.com/freifunk-gluon/gluon/wiki/Commandline-administration
 -----------------------------
