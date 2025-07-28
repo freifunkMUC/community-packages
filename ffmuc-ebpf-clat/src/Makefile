@@ -3,12 +3,11 @@ OUTPUT ?= build
 CLANG ?= clang
 BPFTOOL ?= bpftool
 ARCH ?= x86
-CLAT_CFLAGS ?= -Wall $(TARGET_CFLAGS)
-CLAT_LDFLAGS ?= $(TARGET_LDFLAGS)
+CLAT_CFLAGS ?= $(CFLAGS) -g -Wall
+CLAT_LDFLAGS ?= $(LDFLAGS)
+CLAT_INCLUDES ?=
+CLANG_INCLUDES ?=
 APPS ?= clat
-
-# STAGING_DIR is defined by OpenWRT during its build process
-STAGING_DIR ?=
 
 .PHONY: all
 all: $(APPS)
@@ -26,7 +25,7 @@ $(OUTPUT):
 $(OUTPUT)/%.bpf.o: %.bpf.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -I$(OUTPUT) \
-			-I$(STAGING_DIR)/usr/include -I$(STAGING_DIR)/include \
+			$(CLANG_INCLUDES) \
 			-c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 
@@ -41,7 +40,7 @@ $(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
 $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,CC,$@)
 	$(Q)$(CC) $(CLAT_CFLAGS) -I$(OUTPUT) -c $(filter %.c,$^) \
-			-I$(STAGING_DIR)/usr/include -I$(STAGING_DIR)/include \
+			$(CC_INCLUDES) \
 			-o $@
 
 # Build application binary

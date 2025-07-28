@@ -9,10 +9,21 @@ include $(TOPDIR)/../package/gluon.mk
 
 # TODO: Update Depends
 define Package/$(PKG_NAME)
-  TITLE:=Adds eBPF stuff for testing
-  DEPENDS:=+libbpf +bpf-headers
+  TITLE:=eBPF-based CLAT binary (NAT46)
+  DEPENDS:=+libbpf
   EXTRA_DEPENDS:=kmod-sched-bpf
 endef
+
+MAKE_FLAGS+= \
+	OUTPUT=$(PKG_BUILD_DIR)/build \
+	CLANG=$(firstword $(shell command -v clang clang-1{3..9} clang-2{0..9})) \
+	BPFTOOL=$(shell command -v bpftool) \
+	ARCH=$(ARCH) \
+	CLAT_CFLAGS="-Wall $(CFLAGS)" \
+	CLAT_LDFLAGS="$(LDFLAGS)" \
+	CLAT_INCLUDES="-I$(STAGING_DIR)/usr/include -I$(STAGING_DIR)/include" \
+	CLANG_INCLUDES="-I$(TOOLCHAIN_DIR)/include -I$(STAGING_DIR)/usr/include -I$(STAGING_DIR)/include" \
+	APPS=clat
 
 define Build/Compile
 	$(call Build/Compile/Default,)
