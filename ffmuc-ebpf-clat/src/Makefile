@@ -6,7 +6,7 @@ ARCH ?= x86
 CLAT_CFLAGS ?= $(CFLAGS) -g -Wall
 CLAT_LDFLAGS ?= $(LDFLAGS)
 CLAT_INCLUDES ?=
-CLANG_INCLUDES ?=
+CLANG_INCLUDES ?= $(CLAT_INCLUDES) vmlinux.h
 APPS ?= clat
 
 .PHONY: all
@@ -21,7 +21,12 @@ $(OUTPUT):
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
 
-# # Build BPF code
+# vmlinux.h should only be generated when running clat the same kernel as the running kernel
+# otherwise use kernel-headers for the target system instead
+vmlinux.h:
+	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@
+
+# Build BPF code
 $(OUTPUT)/%.bpf.o: %.bpf.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -I$(OUTPUT) \
