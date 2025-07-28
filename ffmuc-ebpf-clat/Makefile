@@ -10,7 +10,7 @@ include $(TOPDIR)/../package/gluon.mk
 # TODO: Update Depends
 define Package/$(PKG_NAME)
   TITLE:=Adds eBPF stuff for testing
-  DEPENDS:=+libbpf
+  DEPENDS:=+libbpf +bpf-headers
   EXTRA_DEPENDS:=kmod-sched-bpf
 endef
 

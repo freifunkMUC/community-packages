@@ -7,10 +7,8 @@ CLAT_CFLAGS ?= -Wall $(TARGET_CFLAGS)
 CLAT_LDFLAGS ?= $(TARGET_LDFLAGS)
 APPS ?= clat
 
-# Both STAGING_DIR as well as TOOLCHAIN_DIR are defined by OpenWRT during its build process
+# STAGING_DIR is defined by OpenWRT during its build process
 STAGING_DIR ?=
-# TOOLCHAIN_DIR contains headers that are required for the BPF generation and do not be on the target system
-TOOLCHAIN_DIR ?= /usr
 
 .PHONY: all
 all: $(APPS)
@@ -28,7 +26,6 @@ $(OUTPUT):
 $(OUTPUT)/%.bpf.o: %.bpf.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -I$(OUTPUT) \
-			-I$(TOOLCHAIN_DIR)/include \
 			-I$(STAGING_DIR)/usr/include -I$(STAGING_DIR)/include \
 			-c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
