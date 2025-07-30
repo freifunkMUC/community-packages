@@ -9,31 +9,46 @@ CLAT_INCLUDES ?=
 CLANG_INCLUDES ?= $(CLAT_INCLUDES) vmlinux.h
 APPS ?= clat
 
-# libbpf archs (except mips, due to mixed endianness)
+# libbpf archs (except mips and arc, due to mixed endianness)
 # https://github.com/libbpf/libbpf/blob/58dd1f58b57294b2e59482245b29e46f1812b82d/src/bpf_tracing.h#L8-L38
-LIBBPF_ARCHS := x86 s390 arm arm64 powerpc sparc riscv arc loongarch
+LIBBPF_ARCHS_EL := x86 arm arm64 riscv loongarch
+LIBBPF_ARCHS_EB := s390 sparc powerpc
 
 # Convert compiler archs to libbpf archs (required to convert OpenWRT ARCHs)
-ifneq ($(filter $(ARCH),$(LIBBPF_ARCHS)),)
+# and add BPF target with correct endianness
+ifneq ($(filter $(ARCH),$(LIBBPF_ARCHS_EL)),)
 	BPF_TARGET_ARCH = $(ARCH)
+	BPF_TARGET = bpfel
+else ifneq ($(filter $(ARCH),$(LIBBPF_ARCHS_EB)),)
+	BPF_TARGET_ARCH = $(ARCH)
+	BPF_TARGET = bpfeb
 else ifeq ($(ARCH),aarch64)
 	BPF_TARGET_ARCH = arm64
+	BPF_TARGET = bpfel
 else ifeq ($(ARCH),i386)
 	BPF_TARGET_ARCH = x86
+	BPF_TARGET = bpfel
 else ifeq ($(ARCH),x86_64)
 	BPF_TARGET_ARCH = x86
+	BPF_TARGET = bpfel
 else ifeq ($(ARCH),riscv64)
 	BPF_TARGET_ARCH = riscv
+	BPF_TARGET = bpfel
 else ifeq ($(ARCH),powerpc64)
 	BPF_TARGET_ARCH = powerpc
+	BPF_TARGET = bpfeb
 else ifeq ($(ARCH),mips)
 	BPF_TARGET_ARCH = mips -D__MIPSEB__
+	BPF_TARGET = bpfeb
 else ifeq ($(ARCH),mips64)
 	BPF_TARGET_ARCH = mips -D__MIPSEB__
+	BPF_TARGET = bpfeb
 else ifeq ($(ARCH),mipsel)
 	BPF_TARGET_ARCH = mips -D__MIPSEL__
+	BPF_TARGET = bpfel
 else ifeq ($(ARCH),mips64el)
 	BPF_TARGET_ARCH = mips -D__MIPSEL__
+	BPF_TARGET = bpfel
 else
 	BPF_TARGET_ARCH = $(error Unsupported ARCH "$(ARCH)". Please implement it in Makefile.)
 endif
@@ -58,7 +73,7 @@ vmlinux.h:
 # Build BPF code
 $(OUTPUT)/%.bpf.o: %.bpf.c $(wildcard %.h) | $(OUTPUT)
 	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) -I$(OUTPUT) \
+	$(Q)$(CLANG) -g -O2 -target $(BPF_TARGET) -D__TARGET_ARCH_$(BPF_TARGET_ARCH) -I$(OUTPUT) \
 			$(CLANG_INCLUDES) \
 			-c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
