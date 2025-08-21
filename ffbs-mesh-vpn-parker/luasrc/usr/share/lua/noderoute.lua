@@ -212,8 +212,10 @@ local function apply_network(conf, target_state)
 			local f = io.open("/tmp/xlat_range6", "w")
 			f:write(conf.xlat_range6)
 			f:close()
+			os.execute("/etc/init.d/ebpf-clat start")
+		else
+			os.execute("/etc/init.d/ebpf-clat stop")
 		end
-		os.execute("/etc/init.d/ebpf-clat restart")
 		changed = true
 	end
 
