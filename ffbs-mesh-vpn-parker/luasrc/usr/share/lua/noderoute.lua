@@ -206,6 +206,7 @@ local function apply_network(conf, target_state)
 		changed = true
 	end
 
+	-- enable CLAT & set IPv6-only preferred DHCPv4 option, if configured
 	local xlat_range6 = util.read_file("/tmp/xlat_range6")
 	if (target_state and xlat_range6 ~= conf.xlat_range6) or xlat_config_deleted then
 		if conf.xlat_range6 ~= nil and target_state then
@@ -213,8 +214,31 @@ local function apply_network(conf, target_state)
 			f:write(conf.xlat_range6)
 			f:close()
 			os.execute("/etc/init.d/ebpf-clat start")
+
+			local options_table = uci.get("dhcp", DHCP_IFACE, "dhcp_option")
+			if options_table == nil then
+				options_table = {}
+			end
+			if not util.has_value(options_table, 'option:ipv6-only,0') then
+				table.insert(options_table, 'option:ipv6-only,0') -- RFC8925
+				uci_set("dhcp", DHCP_IFACE, "dhcp_option", options_table)
+				uci_commit("dhcp", DHCP_IFACE)
+				os.execute("/etc/init.d/dnsmasq reload")
+			end
+
+			-- set PREF64 option in uradvd (RFC8781) here when implemented
+			util.log("Started ebpf-clat and enabled IPv6-only Preferred DHCP option")
 		else
+			local options_table = uci.get("dhcp", DHCP_IFACE, "dhcp_option")
+			local removed = util.remove_value(options_table, 'option:ipv6-only,0')
+			if removed ~= nil then
+				uci_set("dhcp", DHCP_IFACE, "dhcp_option", options_table)
+				uci_commit("dhcp", DHCP_IFACE)
+				os.execute("/etc/init.d/dnsmasq reload")
+			end
+
 			os.execute("/etc/init.d/ebpf-clat stop")
+			util.log("Stopped ebpf-clat and removed IPv6-only Preferred DHCP option")
 		end
 		changed = true
 	end

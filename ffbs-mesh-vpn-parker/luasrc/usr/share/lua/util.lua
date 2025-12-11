@@ -29,6 +29,15 @@ function util.has_value(tab, val)
 	return false
 end
 
+function util.remove_value(tab, val)
+	for i, value in ipairs(tab) do
+		if value == val then
+			return table.remove(tab, i)
+		end
+	end
+	return nil
+end
+
 function util.check_output(cmd)
 	local f = assert(io.popen(cmd, "r"))
 	local s = assert(f:read("*a"))
