@@ -26,8 +26,8 @@ char _license[] SEC("license") = "GPL";
 #define IP_OFFSET_MASK (0x1FFF)
 #define IP_MF (0x2000)
 
-// #define DEBUG_PRINT(x)
-#define DEBUG_PRINT(x) bpf_printk(x)
+#define DEBUG_PRINT(x)
+// #define DEBUG_PRINT(x) bpf_printk(x)
 
 /* To make the eBPF validator happy, we need to check that the header is
  * entirely within the valid data region.
