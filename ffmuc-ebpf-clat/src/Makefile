@@ -6,7 +6,7 @@ ARCH ?= x86
 CLAT_CFLAGS ?= $(CFLAGS) -Wall
 CLAT_LDFLAGS ?= $(LDFLAGS)
 CLAT_INCLUDES ?=
-CLANG_INCLUDES ?= $(CLAT_INCLUDES) vmlinux.h
+CLANG_INCLUDES ?= $(CLAT_INCLUDES) -Ivmlinux.h
 APPS ?= clat
 
 # libbpf archs (except mips and arc, due to mixed endianness)
