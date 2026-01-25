@@ -7,6 +7,7 @@ CLAT_CFLAGS ?= $(CFLAGS) -Wall
 CLAT_LDFLAGS ?= $(LDFLAGS)
 CLAT_INCLUDES ?=
 CLANG_INCLUDES ?= $(CLAT_INCLUDES) -Ivmlinux.h
+MIN_CLANG_VERSION ?= 20
 APPS ?= clat
 
 # libbpf archs (except mips and arc, due to mixed endianness)
@@ -51,6 +52,13 @@ else ifeq ($(ARCH),mips64el)
 	BPF_TARGET = bpfel
 else
 	BPF_TARGET_ARCH = $(error Unsupported ARCH "$(ARCH)". Please implement it in Makefile.)
+endif
+
+CLANG_VERSION := $(shell $(CLANG) -dumpversion)
+IS_CLANG_NEW_ENOUGH := $(shell expr $(CLANG_VERSION) ">=" $(MIN_CLANG_VERSION))
+
+ifeq ($(IS_CLANG_NEW_ENOUGH),0) # 0 equals "false"
+ $(error Found clang $(CLANG_VERSION). Version $(MIN_CLANG_VERSION) or later is required. See https://gist.github.com/DasSkelett/f373dac5692b95b0daae7ebb58fad8d1.)
 endif
 
 .PHONY: all
