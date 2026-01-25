@@ -69,6 +69,7 @@ $(OUTPUT):
 # otherwise use kernel-headers for the target system instead
 vmlinux.h:
 	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@
+	$(warning auto-generated vmlinux.h. Make sure you are running clat with the same kernel as the currently running kernel!)
 
 # Build BPF code
 $(OUTPUT)/%.bpf.o: %.bpf.c $(wildcard %.h) | $(OUTPUT)
