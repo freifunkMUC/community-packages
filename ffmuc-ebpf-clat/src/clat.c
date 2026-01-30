@@ -2,6 +2,10 @@
 #include <signal.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include "clat.skel.h"
 
 static volatile sig_atomic_t exiting = 0;
@@ -22,16 +26,88 @@ int main(int argc, char **argv) {
 	}
 
 	const int iface = atoi(argv[1]);
+	const char *debug_path = NULL;
+	if (argc >= 5) {
+		debug_path = argv[argc - 1];
+	}
+
+
 	struct clat_bpf *skel;
 	int err;
 	bool ingress_hooked = false, egress_hooked = false;
 
 	libbpf_set_print(libbpf_print_fn);
 
-	skel = clat_bpf__open_and_load();
-	if (!skel) {
-		fprintf(stderr, "Failed to open BPF skeleton\n");
-		return -2;
+	if (debug_path) {
+		FILE *f = fopen(debug_path, "rb");
+		if (!f) {
+			fprintf(stderr, "Failed to open debug BPF object '%s': %s\n", debug_path, strerror(errno));
+			return -2;
+		}
+		if (fseek(f, 0, SEEK_END) != 0) {
+			fclose(f);
+			fprintf(stderr, "Failed to stat debug BPF object '%s'\n", debug_path);
+			return -2;
+		}
+		long sz = ftell(f);
+		if (sz <= 0) {
+			fclose(f);
+			fprintf(stderr, "Debug BPF object '%s' seems empty\n", debug_path);
+			return -2;
+		}
+		rewind(f);
+		void *buf = malloc(sz);
+		if (!buf) {
+			fclose(f);
+			fprintf(stderr, "Out of memory\n");
+			return -2;
+		}
+		if (fread(buf, 1, sz, f) != (size_t)sz) {
+			free(buf);
+			fclose(f);
+			fprintf(stderr, "Failed to read debug BPF object '%s'\n", debug_path);
+			return -2;
+		}
+		fclose(f);
+
+		skel = calloc(1, sizeof(*skel));
+		if (!skel) {
+			free(buf);
+			fprintf(stderr, "Out of memory\n");
+			return -2;
+		}
+		err = clat_bpf__create_skeleton(skel);
+		if (err) {
+			free(buf);
+			clat_bpf__destroy(skel);
+			fprintf(stderr, "Failed to create skeleton: %d\n", err);
+			return -2;
+		}
+
+		/* Replace embedded ELF data with the external buffer */
+		skel->skeleton->data = buf;
+		skel->skeleton->data_sz = sz;
+
+		err = bpf_object__open_skeleton(skel->skeleton, NULL);
+		free(buf);
+		if (err) {
+			clat_bpf__destroy(skel);
+			fprintf(stderr, "Failed to open BPF object from '%s': %d\n", debug_path, err);
+			return -2;
+		}
+		err = clat_bpf__load(skel);
+		if (err) {
+			fprintf(stderr, "Failed to load BPF object from '%s': %d\n", debug_path, err);
+			clat_bpf__destroy(skel);
+			return -2;
+		}
+		printf("Loaded BPF object from '%s'\n", debug_path);
+	} else {
+		skel = clat_bpf__open_and_load();
+		if (!skel) {
+			fprintf(stderr, "Failed to open BPF skeleton\n");
+			return -2;
+		}
 	}
 
 	// TODO: Handle size suffix correctly
