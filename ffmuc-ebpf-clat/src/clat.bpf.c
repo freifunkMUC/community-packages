@@ -344,7 +344,10 @@ int clat_egress_4to6(struct __sk_buff *skb) {
 
 	/* Write IPv6 header. */
 	ENSURE_MEM_VALID(ip6);
-	*ip6 = ip6_new;
+	/* Due to NET_IP_ALIGN the header is usually moved two bytes to the right to adjust for 14-byte ethernet header,
+	 * but thus forcing unaligned access on non-ethernet packets. Let bpf_skb_store_bytes handle this.
+	 * See also https://docs.kernel.org/6.19/core-api/unaligned-memory-access.html#alignment-vs-networking */
+	bpf_skb_store_bytes(skb, l3_off, &ip6_new, sizeof(ip6_new), 0);
 
 	DEBUG_PRINT("Translated egress packet");
 	return TC_ACT_OK;
@@ -623,7 +626,10 @@ int clat_ingress_6to4(struct __sk_buff *skb) {
 
 	/* Write IPv4 header. */
 	ENSURE_MEM_VALID(ip);
-	*ip = ip_new;
+	/* Due to NET_IP_ALIGN the header is usually moved two bytes to the right to adjust for 14-byte ethernet header,
+	 * but thus forcing unaligned access on non-ethernet packets. Let bpf_skb_store_bytes handle this.
+	 * See also https://docs.kernel.org/6.19/core-api/unaligned-memory-access.html#alignment-vs-networking */
+	bpf_skb_store_bytes(skb, l3_off, &ip_new, sizeof(ip_new), 0);
 
 	DEBUG_PRINT("Translated ingress packet");
 	return TC_ACT_OK;
