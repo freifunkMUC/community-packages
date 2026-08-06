@@ -1,4 +1,5 @@
 local clientaddr = require("clientaddr")
+local dhcp = require("parker.dhcp")
 local json = require("jsonc")
 local util = require("util")
 local uci = require("uci")
@@ -9,6 +10,10 @@ local tmpdir = arg[1]
 
 local DHCP_IFACE = "client"
 local CONFIG_FILE = tmpdir .. "/noderoute.json"
+
+-- dnsmasq's name for the DHCPv4 option of RFC 8925, which tells a client
+-- that it may do without IPv4 altogether.
+local IPV6_ONLY_OPTION = "option:ipv6-only"
 
 -- The NAT64 prefix we announce to our clients, in the notation uradvd
 -- expects. Its address part has to stay in sync with the prefix
@@ -108,6 +113,21 @@ local function uci_commit(config)
 	end
 end
 
+local function set_client_option(name, values)
+	-- Announce one DHCPv4 option to our clients, or stop announcing it
+	-- when there are no values. The list it lives in is shared with the
+	-- upgrade scripts, so only our own entry may be touched. Returns
+	-- whether uci has been changed, i.e. whether dnsmasq has to be told.
+
+	local options = dhcp.merge_option(uci.get("dhcp", DHCP_IFACE, "dhcp_option"), name, values)
+	if options == nil then
+		return false
+	end
+	uci_set("dhcp", DHCP_IFACE, "dhcp_option", options)
+	uci_commit("dhcp")
+	return true
+end
+
 local function sections_changed()
 	return not empty(uci.changes("dhcp")) or not empty(uci.changes("network"))
 end
@@ -161,6 +181,7 @@ local function apply_network(conf, target_state, address4)
 	local radvd_config_deleted = false
 	local xlat_config_deleted = false
 	local first_time_active_since_boot = false
+	local dhcp_options_changed = false
 
 	if target_state == true then
 		util.log("network: routing state: active")
@@ -303,31 +324,23 @@ local function apply_network(conf, target_state, address4)
 			f:close()
 			os.execute("/etc/init.d/ebpf-clat start")
 
-			local options_table = uci.get("dhcp", DHCP_IFACE, "dhcp_option")
-			if options_table == nil then
-				options_table = {}
-			end
-			if not util.has_value(options_table, 'option:ipv6-only,0') then
-				table.insert(options_table, 'option:ipv6-only,0') -- RFC8925
-				uci_set("dhcp", DHCP_IFACE, "dhcp_option", options_table)
-				uci_commit("dhcp", DHCP_IFACE)
-				os.execute("/etc/init.d/dnsmasq reload")
-			end
+			dhcp_options_changed = set_client_option(IPV6_ONLY_OPTION, { "0" }) or dhcp_options_changed
 
 			-- the matching PREF64 option for our RAs is set up further up
 			util.log("Started ebpf-clat and enabled IPv6-only Preferred DHCP option")
 		else
-			local options_table = uci.get("dhcp", DHCP_IFACE, "dhcp_option")
-			local removed = util.remove_value(options_table, 'option:ipv6-only,0')
-			if removed ~= nil then
-				uci_set("dhcp", DHCP_IFACE, "dhcp_option", options_table)
-				uci_commit("dhcp", DHCP_IFACE)
-				os.execute("/etc/init.d/dnsmasq reload")
-			end
+			dhcp_options_changed = set_client_option(IPV6_ONLY_OPTION, {}) or dhcp_options_changed
 
 			os.execute("/etc/init.d/ebpf-clat stop")
 			util.log("Stopped ebpf-clat and removed IPv6-only Preferred DHCP option")
 		end
+		changed = true
+	end
+
+	if dhcp_options_changed then
+		-- One reload, however many of the options above have changed.
+		util.log("Reloading dnsmasq to serve our clients the options they now get")
+		os.execute("/etc/init.d/dnsmasq reload")
 		changed = true
 	end
 

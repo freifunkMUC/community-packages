@@ -35,39 +35,59 @@ function dhcp.ipv4_addresses(addrs)
 	return result
 end
 
--- Announces one option with the given values to our clients. Returns
--- whether uci was touched.
-function dhcp.set_client_option(uci, name, values)
+-- A dhcp_option list in which one option carries the given values, and
+-- everybody else's entries are where they were. Without values the
+-- option is dropped, cleaning up after whoever has stopped configuring
+-- it. Returns nil when the list already says exactly that, so a caller
+-- can skip its commit and the dnsmasq reload that follows it.
+function dhcp.merge_option(options, name, values)
+	if type(options) == 'string' then
+		-- An option that is not stored as a list yet.
+		options = { options }
+	end
+
 	local entry
-	if #values > 0 then
+	if values ~= nil and #values > 0 then
 		entry = name .. ',' .. table.concat(values, ',')
 	end
 
-	if entry == nil and uci:get('dhcp', CLIENT_SECTION) == nil then
-		return false
-	end
-
-	local options = {}
-	for _, option in ipairs(uci:get_list('dhcp', CLIENT_SECTION, 'dhcp_option')) do
+	local result = {}
+	local kept, dropped = false, false
+	for _, option in ipairs(options or {}) do
 		-- Ours are the bare name and the name with its values; every
 		-- other entry stays where it is.
 		if option ~= name and option:sub(1, #name + 1) ~= name .. ',' then
-			table.insert(options, option)
+			table.insert(result, option)
+		elseif option == entry and not kept then
+			table.insert(result, option)
+			kept = true
+		else
+			dropped = true
 		end
 	end
 
-	if entry then
-		table.insert(options, entry)
+	if entry ~= nil and not kept then
+		table.insert(result, entry)
+	elseif not dropped then
+		return nil
+	end
+	return result
+end
 
-		if uci:get('dhcp', CLIENT_SECTION) == nil then
-			-- noderoute creates the section when it configures the client
-			-- network, but the option needs a place to live until then.
-			uci:section('dhcp', 'dhcp', CLIENT_SECTION)
-		end
+-- Announces one option with the given values to our clients. Returns
+-- whether uci was touched.
+function dhcp.set_client_option(uci, name, values)
+	local options = dhcp.merge_option(uci:get_list('dhcp', CLIENT_SECTION, 'dhcp_option'), name, values)
+	if options == nil then
+		return false
 	end
 
-	-- Without values the option is dropped, cleaning up after a site
-	-- that has stopped configuring it.
+	if #options > 0 and uci:get('dhcp', CLIENT_SECTION) == nil then
+		-- noderoute creates the section when it configures the client
+		-- network, but the option needs a place to live until then.
+		uci:section('dhcp', 'dhcp', CLIENT_SECTION)
+	end
+
 	uci:set('dhcp', CLIENT_SECTION, 'dhcp_option', options)
 	uci:commit('dhcp')
 	return true
