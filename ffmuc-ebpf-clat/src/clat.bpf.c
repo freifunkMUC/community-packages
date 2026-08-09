@@ -476,9 +476,9 @@ static int __always_inline update_inner_6to4(struct __sk_buff *skb, __u32 offset
 	 * by rewriting the outer ICMP and inner IP header into the skb.
 	 * Outer ICMPv4 header will be written by the caller anyway, so we only need to write the inner IP header.
 	 * Avoid resetting the checksum indicator with BPF_F_ADJ_ROOM_NO_CSUM_RESET, otherwise packets can be dropped by netfilter. */
-    if (bpf_skb_adjust_room(skb, (int) sizeof(struct iphdr) - (int) sizeof(struct ipv6hdr), BPF_ADJ_ROOM_NET, BPF_F_ADJ_ROOM_NO_CSUM_RESET)) {
+	if (bpf_skb_adjust_room(skb, (int) sizeof(struct iphdr) - (int) sizeof(struct ipv6hdr), BPF_ADJ_ROOM_NET, BPF_F_ADJ_ROOM_NO_CSUM_RESET)) {
 		DEBUG_PRINT("Failed to resize ICMP error packet");
-        return TC_ACT_SHOT;
+		return TC_ACT_SHOT;
 	}
 	data_end = (void *)(__u64)skb->data_end;
 	data = (void *)(__u64)skb->data;
