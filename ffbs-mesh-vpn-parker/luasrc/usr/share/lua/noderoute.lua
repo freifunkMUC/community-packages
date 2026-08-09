@@ -324,6 +324,7 @@ local function apply_network(conf, target_state, address4, mtu)
 	end
 
 	local changed = sections_changed()
+	local radvd_stopped = false
 
 	if changed then
 		dump(uci.changes())
@@ -332,6 +333,7 @@ local function apply_network(conf, target_state, address4, mtu)
 		util.log("Reconfiguring network...")
 		util.log("HACK: stopping gluon-radvd")
 		os.execute("/etc/init.d/gluon-radvd stop")
+		radvd_stopped = true
 		util.sleep(1)
 		util.log("HACK: continuing with network reload")
 		os.execute("/etc/init.d/network reload")
@@ -393,13 +395,24 @@ local function apply_network(conf, target_state, address4, mtu)
 		util.log("No longer announcing an MTU to our clients")
 	end
 
+	-- The stop above is not conditional on anything radvd announces, so it
+	-- has to be paired with a start here even when none of the announced
+	-- values changed: a network reconfiguration that touches neither the
+	-- prefix nor the MTU (the duplicate-address move, for example) must not
+	-- leave the clients without router advertisements.
 	local range6 = util.read_file("/tmp/range6")
-	if (target_state and range6 ~= conf.range6) or radvd_config_deleted or pref64_changed or adv_mtu_changed then
-		if conf.range6 ~= nil and target_state then
+	if (target_state and range6 ~= conf.range6) or radvd_config_deleted
+			or pref64_changed or adv_mtu_changed or radvd_stopped then
+		if target_state and conf.range6 ~= nil then
 			util.write_file("/tmp/range6", conf.range6)
 			util.write_file("/tmp/addr6", conf.address6)
+			os.execute("/etc/init.d/gluon-radvd restart")
+		else
+			-- Nothing to announce: without a prefix uradvd exits right
+			-- away and procd stops respawning it after a few attempts,
+			-- so an explicit stop is both quieter and equivalent.
+			os.execute("/etc/init.d/gluon-radvd stop")
 		end
-		os.execute("/etc/init.d/gluon-radvd restart")
 		changed = true
 	end
 
