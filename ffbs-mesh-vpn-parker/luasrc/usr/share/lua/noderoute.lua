@@ -420,23 +420,37 @@ local function apply_network(conf, target_state, address4, mtu)
 		end
 	end
 
-	-- enable CLAT & set IPv6-only preferred DHCPv4 option, if configured
-	local xlat_range6 = util.read_file("/tmp/xlat_range6")
-	if (target_state and xlat_range6 ~= conf.xlat_range6) or xlat_config_deleted then
-		if conf.xlat_range6 ~= nil and target_state then
-			util.write_file("/tmp/xlat_range6", conf.xlat_range6)
-			os.execute("/etc/init.d/ebpf-clat start")
-
-			dhcp_options_changed = set_client_option(IPV6_ONLY_OPTION, { "0" }) or dhcp_options_changed
-
-			-- the matching PREF64 option for our RAs is set up further up
-			util.log("Started ebpf-clat and enabled IPv6-only Preferred DHCP option")
+	-- A client of a node that translates IPv4 may do without an address of
+	-- its own (RFC 8925). Like the MTU above this follows the state we
+	-- want rather than the marker file the CLAT leaves behind: that file
+	-- lives in /tmp and is gone after a reboot, while the option we have
+	-- committed is still in uci, so a node that comes up without tunnels
+	-- would go on announcing it to clients it cannot translate for.
+	local xlat = target_state and conf ~= nil and conf.xlat_range6 or nil
+	if set_client_option(IPV6_ONLY_OPTION, { xlat and "0" }) then
+		dhcp_options_changed = true
+		if xlat ~= nil then
+			util.log("Announcing IPv6-only Preferred to our clients")
 		else
-			dhcp_options_changed = set_client_option(IPV6_ONLY_OPTION, {}) or dhcp_options_changed
-
-			os.execute("/etc/init.d/ebpf-clat stop")
-			util.log("Stopped ebpf-clat and removed IPv6-only Preferred DHCP option")
+			util.log("No longer announcing IPv6-only Preferred to our clients")
 		end
+	end
+
+	-- The CLAT that does the translating. Our clients are told about it by
+	-- the DHCPv4 option above and by the PREF64 option further up; this is
+	-- only about the service, which is as gone as its marker file after a
+	-- reboot.
+	local xlat_range6 = util.read_file("/tmp/xlat_range6")
+	if xlat ~= nil then
+		if xlat_range6 ~= xlat then
+			util.write_file("/tmp/xlat_range6", xlat)
+			os.execute("/etc/init.d/ebpf-clat start")
+			util.log("Started ebpf-clat")
+			changed = true
+		end
+	elseif xlat_range6 ~= nil or xlat_config_deleted then
+		os.execute("/etc/init.d/ebpf-clat stop")
+		util.log("Stopped ebpf-clat")
 		changed = true
 	end
 
