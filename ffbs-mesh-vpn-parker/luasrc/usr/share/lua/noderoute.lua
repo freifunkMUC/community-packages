@@ -11,6 +11,12 @@ local tmpdir = arg[1]
 local DHCP_IFACE = "client"
 local CONFIG_FILE = tmpdir .. "/noderoute.json"
 
+-- The IPv4 default route as set_wg_route() has last put it in place, in
+-- the notation of ip route. The busybox ip on our nodes prints no route
+-- metrics, so this is the only place the MTU on that route can be read
+-- back from.
+local ROUTE4_FILE = tmpdir .. "/noderoute-route4"
+
 -- dnsmasq's name for the DHCPv4 option of RFC 8925, which tells a client
 -- that it may do without IPv4 altogether.
 local IPV6_ONLY_OPTION = "option:ipv6-only"
@@ -72,10 +78,24 @@ local function get_handshake_ages()
 	return result
 end
 
+local function recorded_mtu4(line)
+	-- The MTU of an IPv4 default route ip has printed without one, as
+	-- set_wg_route() has recorded it: nil if it put none on the route, or
+	-- false if this is not the route it has recorded and we cannot tell.
+	local route = string.match(line, "default via %S+ dev %S+")
+	local recorded = util.read_file(ROUTE4_FILE) or ""
+	if route == nil or string.match(recorded, "default via %S+ dev %S+") ~= route then
+		return false
+	end
+	return tonumber(string.match(recorded, "mtu (%d+)"))
+end
+
 local function get_wg_routes()
 	-- The default routes we have installed, as { iface, mtu } pairs. Only
 	-- IPv4 routes are listed, and only the IPv4 one carries an MTU, see
-	-- set_wg_route().
+	-- set_wg_route(). iproute2 prints that MTU, but busybox ip prints no
+	-- route metrics at all, so for a route without one we go by our own
+	-- record, and an mtu of false means that we cannot tell.
 	local result = {}
 	local output = util.check_output("ip r show proto " .. RT_PROTO)
 	util.log("Checking for wg routes")
@@ -85,7 +105,11 @@ local function get_wg_routes()
 			if not string.find(line, "broadcast") then
 				for iface in string.gmatch(line, "dev [a-z0-9-_]+") do
 					util.log("Route found")
-					table.insert(result, { iface = iface:sub(5), mtu = tonumber(string.match(line, "mtu (%d+)")) })
+					local mtu = tonumber(string.match(line, "mtu (%d+)"))
+					if mtu == nil then
+						mtu = recorded_mtu4(line)
+					end
+					table.insert(result, { iface = iface:sub(5), mtu = mtu })
 				end
 			end
 		end
@@ -97,13 +121,17 @@ local function set_wg_route(iface, conc, mtu4)
 	-- Route our clients through a tunnel. An IPv4 MTU is put on the route
 	-- rather than on the interface, which carries IPv6 as well: only the
 	-- IPv4 packets have to fit through the CLAT before they reach it.
-	local mtu = ""
+	local route4 = "default via " .. conc["address4"] .. " dev " .. iface .. " proto " .. RT_PROTO
 	if mtu4 ~= nil then
-		mtu = " mtu " .. mtu4
+		route4 = route4 .. " mtu " .. mtu4
 	end
-	local res = os.execute(
-		"ip -4 r replace default via " .. conc["address4"] .. " dev " .. iface .. " proto " .. RT_PROTO .. mtu
-	)
+	-- The record only ever describes a route the kernel has taken: it goes
+	-- before the route is touched and comes back once ip has succeeded.
+	os.remove(ROUTE4_FILE)
+	local res = os.execute("ip -4 r replace " .. route4)
+	if res == 0 then
+		util.write_file(ROUTE4_FILE, route4)
+	end
 	return res
 		+ os.execute("ip -6 r replace default via " .. conc["address6"] .. " dev " .. iface .. " proto " .. RT_PROTO)
 end
@@ -546,7 +574,9 @@ local function update(report)
 	if current and util.has_value(active, current.iface) then
 		if current.mtu ~= route_mtu4 then
 			-- The tunnels have been resized under us, so what our clients
-			-- may send through this one has changed as well.
+			-- may send through this one has changed as well - or we cannot
+			-- tell what the route carries (false, see get_wg_routes()) and
+			-- have to put the MTU on it again to be sure.
 			local conc = find_concentrator(conf, current.iface)
 			if conc ~= nil then
 				util.log("Setting the IPv4 MTU of the route via " .. current.iface .. " to " .. tostring(route_mtu4))
@@ -563,6 +593,7 @@ local function update(report)
 
 	if #active == 0 then
 		util.log("No active tunnels. Removing default routes via wg_x.")
+		os.remove(ROUTE4_FILE)
 		local ip4route = util.check_output("ip -4 r show")
 		for line in string.gmatch(ip4route, "[^\n]+") do
 			if string.find(line, "default via") then
