@@ -179,25 +179,21 @@ is_loadbalancing_enabled() {
 }
 
 customwget() {
-	local wget_infos user_agent headerret name value line=2
-
-	wget_infos=$(lua /lib/gluon/gluon-mesh-wireguard-vxlan/get-wget-infos.lua) ||
-		logger -p err -t checkuplink "Collecting node infos for HTTP headers failed"
-	user_agent=$(echo "$wget_infos" | sed -n 1p)
+	local user_agent headerret header
 
 	# This header check is only required for OpenWrt versions <= 23.05,
 	# as headers are first available in OpenWrt 24.10.
 	headerret=0
 	wget -q -O /dev/null "http://[::1]" --header="X: X" 2>/dev/null || headerret=$?
 	# returns Generic Error =1 if no headers for wget are available.
-	if [ "$headerret" -ne 1 ]; then
-		# wget rejects headers with empty values
-		for name in Gluon-Version Board-Name Openwrt-Version Kernel-Version Target-Name Firmware-Version; do
-			value=$(echo "$wget_infos" | sed -n "${line}p")
-			line=$((line + 1))
-			[ -z "$value" ] || set -- --header="X-$name: $value" "$@"
+	{
+		read -r user_agent || true
+		while read -r header; do
+			[ "$headerret" -eq 1 ] || set -- --header="$header" "$@"
 		done
-	fi
+	} <<-EOF
+		$NODE_INFOS
+	EOF
 
 	[ -z "$user_agent" ] || set -- -U "$user_agent" "$@"
 	force_wan_connection wget -q -O- "$@"
@@ -342,6 +338,8 @@ ip link delete dev "${MESH_VPN_IFACE}" >/dev/null 2>&1 || true
 
 PUBLICKEY=$(uci get wireguard.mesh_vpn.privatekey | wg pubkey)
 SEGMENT=$(uci get gluon.core.domain)
+NODE_INFOS=$(lua /lib/gluon/gluon-mesh-wireguard-vxlan/get-wget-infos.lua) ||
+	logger -p err -t checkuplink "Collecting node infos for HTTP headers failed"
 
 # Push public key to broker and receive gateway data, test for https and use if supported
 ret=0
