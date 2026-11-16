@@ -100,7 +100,9 @@ while true; do
 		exit 1
 	fi
 
-	LD_PRELOAD=libpacketmark.so wget -T "$FETCH_TIMEOUT" "http://${config_server}/config?pubkey=${pubkey}&nonce=${nonce}&v6mtu=${v6mtu}&version=${version}${tc_info}" -O "${tmpdir}response" -q
+	# caps=multiprefix: this node can take one prefix from each site
+	# (multi-site operation, see parker-sites.lua).
+	LD_PRELOAD=libpacketmark.so wget -T "$FETCH_TIMEOUT" "http://${config_server}/config?pubkey=${pubkey}&nonce=${nonce}&v6mtu=${v6mtu}&version=${version}&caps=multiprefix${tc_info}" -O "${tmpdir}response" -q
 	RET=$?
 	if [ $RET -gt 0 ]; then
 		$LOGGER "failed to fetch config with exit code $RET. Doing nothing."
@@ -113,6 +115,8 @@ while true; do
 	tail -n 1 "${tmpdir}response" >> "${tmpdir}config.json.sig"
 
 	if usign -V -m "${tmpdir}config.json" -p $SIGN_PUB_KEY -q ; then
+		# Multi-site: keep the pgw that parker-sites uses for each site.
+		lua /usr/share/lua/parker-sites.lua pin "${tmpdir}config.json"
 		if outp=$(lua /usr/share/lua/nodeconfig.lua "${tmpdir}config.json" "$nonce" "$tmpdir") ; then
 			echo "$outp"
 			slp=$(echo "$outp" | tail -n1)
