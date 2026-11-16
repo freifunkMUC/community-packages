@@ -102,9 +102,8 @@ A node can connect to two or more sites (PoPs) at the same time. One site
 is active. The other sites are on standby. Clients use the prefix of the
 active site for new connections.
 
-The node announces `caps=multiprefix` to the config service. When the
-config service sends `sites` and `primary_site`, the `parker-sites` service
-does these steps:
+When the config service sends `sites` and `primary_site`, the
+`parker-sites` service does these steps:
 
 * It monitors the gateway (pgw) of each site with one ping each second.
 * After 3 missed pings, it moves the tunnel to the next pgw of the same

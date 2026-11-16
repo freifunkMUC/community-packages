@@ -112,9 +112,7 @@ while true; do
 		fi
 	fi
 
-	# caps=multiprefix: this node can take one prefix from each site
-	# (multi-site operation, see parker-sites.lua).
-	LD_PRELOAD=libpacketmark.so wget -T "$FETCH_TIMEOUT" "http://${config_server}/config?pubkey=${pubkey}&nonce=${nonce}&v6mtu=${v6mtu}&version=${version}&caps=multiprefix${site_info}${tc_info}" -O "${tmpdir}response" -q
+	LD_PRELOAD=libpacketmark.so wget -T "$FETCH_TIMEOUT" "http://${config_server}/config?pubkey=${pubkey}&nonce=${nonce}&v6mtu=${v6mtu}&version=${version}${site_info}${tc_info}" -O "${tmpdir}response" -q
 	RET=$?
 	if [ $RET -gt 0 ]; then
 		$LOGGER "failed to fetch config with exit code $RET. Doing nothing."
