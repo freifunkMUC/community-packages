@@ -560,17 +560,12 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 	-- dnsmasq: the DNS64 of each up site, active first.
 	local servers = {}
 	for _, name in ipairs(order) do
-		if up[name] and type(conf.sites[name].dns64) == "string" then
+		if up[name] and conf.sites[name].dns64 then
 			table.insert(servers, "server=" .. conf.sites[name].dns64)
 		end
 	end
 	local servers_file = STATE .. "/dns-servers"
-	if #servers == 0 then
-		-- No DNS64 from the config service: keep the servers of the node.
-		-- An empty servers file leaves dnsmasq without upstream.
-		os.remove(servers_file)
-		apply_dns(nil)
-	elseif update_file(servers_file, table.concat(servers, "\n") .. "\n") then
+	if update_file(servers_file, table.concat(servers, "\n") .. "\n") then
 		apply_dns(servers_file)
 		log("DNS servers: " .. table.concat(servers, " "))
 	end
