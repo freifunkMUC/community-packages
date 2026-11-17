@@ -264,7 +264,10 @@ function clientaddr.select(conf, tmpdir)
 
 	local claim, age = dat_claim(address4)
 	if claim == nil then
-		forget_conflict(tmpdir)
+		-- Keep the record: the DAT entry of a contested address flips
+		-- between the two of us, so a cycle without a sighting is normal
+		-- during a conflict. conflict_age() drops the record once it is
+		-- older than CONFLICT_MEMORY.
 		return address4
 	end
 	util.log("client address: " .. address4 .. " has been used by " .. claim .. " " .. age .. "s ago")
