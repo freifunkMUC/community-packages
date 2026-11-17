@@ -1,0 +1,10 @@
+#!/bin/sh
+# gluon-client-bridge (300) enables multicast snooping on br-client. Then
+# the node sends a solicited-node NS only to ports with an MDB entry. When
+# a client has no MDB entry (seen with iPhones), it never gets the NS and
+# loses IPv6. Without snooping the bridge floods multicast to
+# all ports. The querier needs snooping, so switch it off too.
+uci -q get network.client >/dev/null || exit 0
+uci set network.client.igmp_snooping='0'
+uci set network.client.multicast_querier='0'
+uci commit network

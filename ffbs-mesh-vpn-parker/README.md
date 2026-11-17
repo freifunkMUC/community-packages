@@ -97,6 +97,26 @@ untranslated IPv4 packet. The 28 bytes reach it because noderoute puts
 them on the IPv4 default route rather than on the interface, which
 carries the IPv6 packets that do not pay them.
 
+Multicast snooping
+------------------
+
+The upgrade script `902-parker-client-no-snooping` switches off multicast
+snooping and the multicast querier on `br-client`.
+
+With snooping, the bridge sends a multicast packet only to the ports that
+have an entry for its group. The neighbour solicitation (NS) for a client
+address goes to the solicited-node group of that address. When a client has
+no entry (seen with iPhones), it does not get the NS. Its address stays
+INCOMPLETE, and the client loses IPv6.
+
+Without snooping:
+
+* The bridge sends each multicast packet to all ports of `br-client`.
+* batman-adv marks the node as not able to snoop. Other nodes then send
+  all multicast to this node.
+* This adds multicast traffic only in the local mesh. A Parker node has
+  no VPN mesh, so no multicast goes through the tunnels.
+
 Multi-site operation
 --------------------
 
