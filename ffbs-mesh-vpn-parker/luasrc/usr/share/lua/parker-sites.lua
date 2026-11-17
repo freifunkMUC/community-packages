@@ -80,10 +80,14 @@ local T = {
 	dead_keep = 180,
 	keepalive = 25,
 	-- Router lifetime and RA interval. After a roam, the old node stays the
-	-- router of a client (through the mesh) until the router lifetime ends.
-	ra_lifetime = 30,
-	ra_min_interval = 5,
-	ra_max_interval = 10,
+	-- router of a client (through the mesh) until the router lifetime ends,
+	-- so keep it at or below the preferred lifetime. Android 14 and later
+	-- ignore lifetimes below 180 s (accept_ra_min_lft). uradvd sets the
+	-- PREF64 lifetime to 3 x max interval, rounded down to 8 s: 296 s.
+	-- A state change does not wait for the interval: SIGHUP sends RAs at once.
+	ra_lifetime = 300,
+	ra_min_interval = 33,
+	ra_max_interval = 100,
 }
 
 util.loggername = "parker-sites"
