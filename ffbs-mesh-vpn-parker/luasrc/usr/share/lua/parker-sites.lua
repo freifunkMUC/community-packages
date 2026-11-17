@@ -46,6 +46,7 @@
 -- pgw switch.
 
 local json = require("jsonc")
+local posix = require("posix")
 local util = require("util")
 
 local TMPDIR = "/tmp/ff-Ohb0ba0u"
@@ -101,11 +102,24 @@ local function sh(cmd)
 	return r == 0 or r == true
 end
 
-local function update_file(path, data)
+-- Write in place and keep the inode. Use this for a file that a jailed
+-- daemon reads: ujail bind-mounts the file, so after a rename the jail
+-- keeps the old, deleted file.
+local function write_in_place(path, data)
+	local file = io.open(path, "w")
+	if not file then
+		return false
+	end
+	file:write(data)
+	file:close()
+	return true
+end
+
+local function update_file(path, data, write)
 	if util.read_file(path) == data then
 		return false
 	end
-	util.write_file(path, data)
+	(write or util.write_file)(path, data)
 	return true
 end
 
@@ -426,6 +440,21 @@ local function apply_firewall(conf, names, up)
 	end
 end
 
+-- Does each dnsmasq (in its ujail) see the same file at path as we do?
+-- No, when dnsmasq started before the file existed or before a rename.
+local function dnsmasq_sees(path)
+	local st = posix.stat(path)
+	local found = false
+	for pid in output("pidof dnsmasq"):gmatch("%d+") do
+		local jst = posix.stat("/proc/" .. pid .. "/root" .. path)
+		if not st or not jst or jst.dev ~= st.dev or jst.ino ~= st.ino then
+			return false
+		end
+		found = true
+	end
+	return found
+end
+
 -- dnsmasq: use the servers in file, or the saved servers when file is nil.
 local function apply_dns(file)
 	local current = output("uci -q get dhcp.@dnsmasq[0].serversfile"):match("%S+")
@@ -442,8 +471,12 @@ local function apply_dns(file)
 		util.write_file(DNS_SAVED, output("uci -q get dhcp.@dnsmasq[0].server"))
 		sh("uci -q delete dhcp.@dnsmasq[0].server")
 		sh("uci set dhcp.@dnsmasq[0].serversfile=" .. file)
-	else
+	elseif dnsmasq_sees(file) then
 		sh("/etc/init.d/dnsmasq reload")
+		return
+	else
+		log("dnsmasq does not see " .. file .. ": restarting dnsmasq")
+		sh("/etc/init.d/dnsmasq restart")
 		return
 	end
 	sh("uci commit dhcp")
@@ -565,7 +598,7 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 		end
 	end
 	local servers_file = STATE .. "/dns-servers"
-	if update_file(servers_file, table.concat(servers, "\n") .. "\n") then
+	if update_file(servers_file, table.concat(servers, "\n") .. "\n", write_in_place) then
 		apply_dns(servers_file)
 		log("DNS servers: " .. table.concat(servers, " "))
 	end
