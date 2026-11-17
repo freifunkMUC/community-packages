@@ -73,9 +73,11 @@ and 1376 their WAN would allow.
 
 The 28 bytes the CLAT costs are the 20 between the IPv4 header it takes
 off and the IPv6 header it puts on, plus the 8 bytes of the fragment
-header RFC 7915 asks a translator to add to a packet that may still be
-fragmented. ebpf-clat drops those packets instead of translating them,
-so for now those 8 bytes are headroom.
+header RFC 7915 asks a translator to add to an IPv4 fragment. The kernel
+fragments IPv4 packets without DF at the 1347 of the route, and
+ebpf-clat translates each TCP or UDP fragment to an IPv6 fragment of at
+most 1375 bytes. Fragmented ICMP is dropped (RFC 7915 section 1.3), so
+a `ping -s 1400` over IPv4 gets no answer.
 
 The tunnels with a live handshake are all candidates for the default
 route, and noderoute may pick another one on any of its cycles without
