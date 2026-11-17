@@ -26,8 +26,8 @@
 --
 -- When a state changes, and every 10 s, the daemon applies:
 --   * the address of each site on br-client and as /128 on its tunnel,
---   * source rules: "from <site /64>" and "to <site DNS64> iif lo" use the
---     table of the site (default dev wg_cX),
+--   * source rules: "from <site /64>" and, after them, "to <site DNS64>
+--     iif lo" use the table of the site (default dev wg_cX),
 --   * the IPv6 and IPv4 default routes on the tunnel of the active site
 --     (the IPv4 route selects the CLAT of that tunnel),
 --   * ip6tables chain parker_src for packets out of wg_c+: a source from a
@@ -504,12 +504,14 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 			end
 			sh("ip -6 route replace default dev " .. iface[name] .. " src " .. site.address6
 				.. " table " .. tbl[name])
-			if site.dns64 then
-				table.insert(rules, "pref " .. (RULE_MIN + 50 + i) .. " to " .. site.dns64
-					.. " iif lo lookup " .. tbl[name])
-			end
 			table.insert(rules, "pref " .. (RULE_MIN + 100 + i) .. " from " .. site.range6
 				.. " lookup " .. tbl[name])
+			-- After the source rules: a packet with a site source must use
+			-- the tunnel of that site, also to the DNS64 of another site.
+			if site.dns64 then
+				table.insert(rules, "pref " .. (RULE_MIN + 150 + i) .. " to " .. site.dns64
+					.. " iif lo lookup " .. tbl[name])
+			end
 		end
 	end
 	apply_rules(rules)
