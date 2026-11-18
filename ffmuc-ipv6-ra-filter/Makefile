@@ -9,7 +9,7 @@ include $(TOPDIR)/../package/gluon.mk
 
 define Package/$(PKG_NAME)
   TITLE:=Accept router advertisements only from the selected batman-adv gateway
-  DEPENDS:=+gluon-ebtables +libgluonutil +libbatadv +libnl-tiny
+  DEPENDS:=+gluon-ebtables +libgluonutil +libbatadv +libnl-tiny +ip6tables +kmod-ipt-core
 endef
 
 MAKE_VARS += \

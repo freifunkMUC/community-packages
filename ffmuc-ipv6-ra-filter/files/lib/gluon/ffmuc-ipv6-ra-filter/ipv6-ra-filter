@@ -11,9 +11,17 @@ STATE_FILE=/tmp/ffmuc-ipv6-ra-filter.gw
 LOCK_FILE=/var/lock/ffmuc-ipv6-ra-filter.lock
 MISSING_FILE=/tmp/ffmuc-ipv6-ra-filter.missing
 FALLBACK_FILE=/tmp/ffmuc-ipv6-ra-filter.fallback
+RA_FILE=/tmp/ffmuc-ipv6-ra-filter.ra
+TIMER_FILE=/tmp/ffmuc-ipv6-ra-filter.timer
+COUNT_CHAIN=ffmuc_ra_count
 # Time in seconds that the node can be without a default route through the
 # selected router before the filter accepts all routers
 FALLBACK_DELAY=30
+# Maximum router advertisement interval of the gateways. When no router
+# advertisement of the selected router arrives for 3 intervals, the filter
+# accepts all routers.
+MAX_RA_INTERVAL=100
+RA_TIMEOUT=$((3 * MAX_RA_INTERVAL))
 
 log() {
 	logger -t ipv6_ra_filter "$*"
@@ -67,9 +75,42 @@ get_default_router_macs() {
 	done
 }
 
-# Run the script again later, to check that the node has IPv6
-recheck_later() {
+# Run the script again after $1 seconds. Only one timer runs, unless the new
+# time is earlier.
+schedule_check() {
+	local target pid old
+
+	target=$(($(uptime_s) + $1))
+	if read -r pid old 2>/dev/null < "$TIMER_FILE" &&
+		kill -0 "$pid" 2>/dev/null && [ "$old" -le "$target" ]; then
+		return
+	fi
 	(sleep "$1"; exec "$0") >/dev/null 2>&1 &
+	echo "$! $target" > "$TIMER_FILE"
+}
+
+ipt() {
+	ip6tables -w -t mangle "$@"
+}
+
+# Count the router advertisements of the selected router that the node
+# receives (after the ebtables filter)
+sync_counter() {
+	local have mac
+
+	ipt -N "$COUNT_CHAIN" 2>/dev/null
+	ipt -C INPUT -i br-client -p ipv6-icmp --icmpv6-type router-advertisement -j "$COUNT_CHAIN" 2>/dev/null ||
+		ipt -I INPUT -i br-client -p ipv6-icmp --icmpv6-type router-advertisement -j "$COUNT_CHAIN"
+	have="$(ipt -S "$COUNT_CHAIN" | sed -n 's/.*--mac-source \([0-9A-Fa-f:]*\).*/\1/p' | tr 'A-F' 'a-f' | sort | tr '\n' ' ')"
+	[ "$have" = "$(echo "$1" | tr ' ' '\n' | grep . | sort | tr '\n' ' ')" ] && return
+	ipt -F "$COUNT_CHAIN"
+	for mac in $1; do
+		ipt -A "$COUNT_CHAIN" -m mac --mac-source "$mac" -j RETURN
+	done
+}
+
+get_ra_count() {
+	ipt -L "$COUNT_CHAIN" -v -x -n 2>/dev/null | awk '/MAC/ { n += $1 } END { print n + 0 }'
 }
 
 drop_all() {
@@ -84,7 +125,7 @@ accept_all() {
 		drop_all
 		ebtables-tiny -A "$CHAIN" -j ACCEPT
 	fi
-	rm -f "$STATE_FILE" "$MISSING_FILE" "$FALLBACK_FILE"
+	rm -f "$STATE_FILE" "$MISSING_FILE" "$FALLBACK_FILE" "$RA_FILE"
 }
 
 renew_client_config() {
@@ -111,6 +152,9 @@ renew_client_config() {
 
 lock "$LOCK_FILE"
 trap 'lock -u "$LOCK_FILE"' EXIT
+
+# This run is the pending timer
+read -r pid _ 2>/dev/null < "$TIMER_FILE" && [ "$pid" = "$$" ] && rm -f "$TIMER_FILE"
 
 if ! ebtables-tiny -L "$CHAIN" >/dev/null 2>&1; then
 	log "ebtables chain $CHAIN does not exist. Creating it."
@@ -148,43 +192,76 @@ if [ -z "$want" ]; then
 	exit 2
 fi
 
+now="$(uptime_s)"
 old_gw="$(cat "$STATE_FILE" 2>/dev/null)"
 gw_changed=0
 if [ "$old_gw" != "$gw" ]; then
 	gw_changed=1
 	echo "$gw" > "$STATE_FILE"
 	rm -f "$FALLBACK_FILE"
-	uptime_s > "$MISSING_FILE"
+	echo "$now" > "$MISSING_FILE"
 fi
 
-# Fallback: when the router of the selected gateway is not the IPv6 default
-# router of the node for FALLBACK_DELAY seconds, accept the router
-# advertisements of all routers. Then the node and the clients do not stay
-# without IPv6 while another router announces a prefix. Stop the fallback when
-# the router of the selected gateway is a default router again.
+# Fallback: accept the router advertisements of all routers when the node has
+# no default route through the router of the selected gateway for
+# FALLBACK_DELAY seconds, or when it receives no router advertisement from it
+# for RA_TIMEOUT seconds. Then the node and the clients do not stay without
+# IPv6 while another router announces a prefix. Stop the fallback when a new
+# router advertisement of the selected router arrives and the node has a
+# default route through it.
 use_fallback=0
-if [ "$gw_changed" = 0 ] && [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
+if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
+	sync_counter "$want"
+	count="$(get_ra_count)"
+	last_count=""
+	last_seen=""
+	read -r last_count last_seen 2>/dev/null < "$RA_FILE"
+	if [ "$gw_changed" = 1 ] || [ "$count" != "$last_count" ] || [ -z "$last_seen" ]; then
+		last_seen="$now"
+	fi
+	echo "$count $last_seen" > "$RA_FILE"
+
 	router_ok=0
 	for mac in $(get_default_router_macs); do
 		contains "$want" "$mac" && router_ok=1
 	done
 	if [ "$router_ok" = 1 ]; then
 		rm -f "$MISSING_FILE"
-		if [ -f "$FALLBACK_FILE" ]; then
+	elif [ ! -f "$MISSING_FILE" ]; then
+		echo "$now" > "$MISSING_FILE"
+	fi
+	missing_since="$(cat "$MISSING_FILE" 2>/dev/null)"
+
+	if [ -f "$FALLBACK_FILE" ]; then
+		if [ "$router_ok" = 1 ] && [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
 			rm -f "$FALLBACK_FILE"
 			log "Router of gateway $gw is back. Stopping the fallback."
-		fi
-	elif [ -f "$FALLBACK_FILE" ]; then
-		use_fallback=1
-	elif [ -f "$MISSING_FILE" ]; then
-		if [ $(($(uptime_s) - $(cat "$MISSING_FILE"))) -ge "$FALLBACK_DELAY" ]; then
-			touch "$FALLBACK_FILE"
+		else
 			use_fallback=1
-			log "No IPv6 default route through gateway $gw. Accepting all router advertisements."
 		fi
+	elif [ "$gw_changed" = 0 ]; then
+		reason=""
+		[ -n "$missing_since" ] && [ $((now - missing_since)) -ge "$FALLBACK_DELAY" ] &&
+			reason="No IPv6 default route through gateway $gw."
+		[ $((now - last_seen)) -ge "$RA_TIMEOUT" ] &&
+			reason="No router advertisement from gateway $gw for $((now - last_seen)) seconds."
+		if [ -n "$reason" ]; then
+			echo "$now" > "$FALLBACK_FILE"
+			use_fallback=1
+			log "$reason Accepting all router advertisements."
+		fi
+	fi
+
+	if [ "$use_fallback" = 1 ]; then
+		# Check often whether the selected router is back
+		schedule_check 10
 	else
-		uptime_s > "$MISSING_FILE"
-		recheck_later $((FALLBACK_DELAY + 2))
+		next=$((last_seen + RA_TIMEOUT))
+		[ -n "$missing_since" ] && [ $((missing_since + FALLBACK_DELAY)) -lt "$next" ] &&
+			next=$((missing_since + FALLBACK_DELAY))
+		delay=$((next - now + 1))
+		[ "$delay" -lt 1 ] && delay=1
+		schedule_check "$delay"
 	fi
 fi
 
@@ -227,7 +304,6 @@ if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
 fi
 
 [ "$gw_changed" = 1 ] || exit 0
-[ "$(uci -q get network.client6.proto)" = dhcpv6 ] && recheck_later $((FALLBACK_DELAY + 2))
 
 # Only a mesh-only node gets its client configuration from the gateway
 [ "$(uci -q get network.client.proto)" = dhcp ] || exit 0
