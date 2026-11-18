@@ -9,6 +9,11 @@ CHAIN=IPV6_RA_FILTER
 EBTABLES_FILE=/lib/gluon/ebtables/402-ffmuc-ipv6-ra-filter
 STATE_FILE=/tmp/ffmuc-ipv6-ra-filter.gw
 LOCK_FILE=/var/lock/ffmuc-ipv6-ra-filter.lock
+MISSING_FILE=/tmp/ffmuc-ipv6-ra-filter.missing
+FALLBACK_FILE=/tmp/ffmuc-ipv6-ra-filter.fallback
+# Time in seconds that the node can be without a default route through the
+# selected router before the filter accepts all routers
+FALLBACK_DELAY=30
 
 log() {
 	logger -t ipv6_ra_filter "$*"
@@ -45,6 +50,28 @@ get_router_macs() {
 	' | sort -u
 }
 
+uptime_s() {
+	cut -d. -f1 /proc/uptime
+}
+
+# MAC addresses of the IPv6 default routers of the node
+get_default_router_macs() {
+	ip -6 route show default dev br-client 2>/dev/null | awk '{
+		for (i = 1; i < NF; i++)
+			if ($i == "via") print $(i + 1)
+	}' | while read -r router; do
+		ip -6 neigh show dev br-client to "$router" | awk '{
+			for (i = 1; i < NF; i++)
+				if ($i == "lladdr") print $(i + 1)
+		}'
+	done
+}
+
+# Run the script again later, to check that the node has IPv6
+recheck_later() {
+	(sleep "$1"; exec "$0") >/dev/null 2>&1 &
+}
+
 drop_all() {
 	ebtables-tiny -F "$CHAIN"
 }
@@ -57,7 +84,7 @@ accept_all() {
 		drop_all
 		ebtables-tiny -A "$CHAIN" -j ACCEPT
 	fi
-	rm -f "$STATE_FILE"
+	rm -f "$STATE_FILE" "$MISSING_FILE" "$FALLBACK_FILE"
 }
 
 renew_client_config() {
@@ -121,16 +148,56 @@ if [ -z "$want" ]; then
 	exit 2
 fi
 
-rules="$(ebtables-tiny -L "$CHAIN" | grep -e '-j ')"
-have="$(echo "$rules" | sed -n 's/^-s \([0-9a-f:]*\) -j ACCEPT *$/\1/p' | tr '\n' ' ')"
-accept_rule=0
-if [ -n "$rules" ] && echo "$rules" | grep -q -v -e '^-s [0-9a-f:]* -j ACCEPT *$' -e '^-j ACCEPT *$'; then
+old_gw="$(cat "$STATE_FILE" 2>/dev/null)"
+gw_changed=0
+if [ "$old_gw" != "$gw" ]; then
+	gw_changed=1
+	echo "$gw" > "$STATE_FILE"
+	rm -f "$FALLBACK_FILE"
+	uptime_s > "$MISSING_FILE"
+fi
+
+# Fallback: when the router of the selected gateway is not the IPv6 default
+# router of the node for FALLBACK_DELAY seconds, accept the router
+# advertisements of all routers. Then the node and the clients do not stay
+# without IPv6 while another router announces a prefix. Stop the fallback when
+# the router of the selected gateway is a default router again.
+use_fallback=0
+if [ "$gw_changed" = 0 ] && [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
+	router_ok=0
+	for mac in $(get_default_router_macs); do
+		contains "$want" "$mac" && router_ok=1
+	done
+	if [ "$router_ok" = 1 ]; then
+		rm -f "$MISSING_FILE"
+		if [ -f "$FALLBACK_FILE" ]; then
+			rm -f "$FALLBACK_FILE"
+			log "Router of gateway $gw is back. Stopping the fallback."
+		fi
+	elif [ -f "$FALLBACK_FILE" ]; then
+		use_fallback=1
+	elif [ -f "$MISSING_FILE" ]; then
+		if [ $(($(uptime_s) - $(cat "$MISSING_FILE"))) -ge "$FALLBACK_DELAY" ]; then
+			touch "$FALLBACK_FILE"
+			use_fallback=1
+			log "No IPv6 default route through gateway $gw. Accepting all router advertisements."
+		fi
+	else
+		uptime_s > "$MISSING_FILE"
+		recheck_later $((FALLBACK_DELAY + 2))
+	fi
+fi
+
+rules="$(ebtables-tiny -L "$CHAIN" | grep -e '-j ' | sed 's/ *$//')"
+have="$(echo "$rules" | sed -n 's/^-s \([0-9a-f:]*\) -j ACCEPT$/\1/p' | tr '\n' ' ')"
+if [ -n "$rules" ] && echo "$rules" | grep -q -v -e '^-s [0-9a-f:]* -j ACCEPT$' -e '^-j ACCEPT$'; then
 	# Remove rules that this version of the script does not create
 	drop_all
+	rules=""
 	have=""
-elif echo "$rules" | grep -q -e '^-j ACCEPT *$'; then
-	accept_rule=1
 fi
+accept_rule=0
+echo "$rules" | grep -q -x -e '-j ACCEPT' && accept_rule=1
 
 changed=0
 # Add the new rules before the old rules are removed, so that no
@@ -140,20 +207,27 @@ for mac in $want; do
 	ebtables-tiny -A "$CHAIN" -s "$mac" -j ACCEPT
 	changed=1
 done
+if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
+	ebtables-tiny -A "$CHAIN" -j ACCEPT
+fi
 for mac in $have; do
 	contains "$want" "$mac" && continue
 	ebtables-tiny -D "$CHAIN" -s "$mac" -j ACCEPT
 	changed=1
 done
-if [ "$accept_rule" = 1 ]; then
+if [ "$use_fallback" = 0 ] && [ "$accept_rule" = 1 ]; then
 	ebtables-tiny -D "$CHAIN" -j ACCEPT
 	changed=1
 fi
 [ "$changed" = 1 ] && log "Accepting router advertisements of gateway $gw from: $want"
 
-old_gw="$(cat "$STATE_FILE" 2>/dev/null)"
-[ "$old_gw" = "$gw" ] && exit 0
-echo "$gw" > "$STATE_FILE"
+if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
+	# Request router advertisements from all routers now
+	ifup client6
+fi
+
+[ "$gw_changed" = 1 ] || exit 0
+[ "$(uci -q get network.client6.proto)" = dhcpv6 ] && recheck_later $((FALLBACK_DELAY + 2))
 
 # Only a mesh-only node gets its client configuration from the gateway
 [ "$(uci -q get network.client.proto)" = dhcp ] || exit 0
