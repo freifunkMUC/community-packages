@@ -1,8 +1,14 @@
 # ffmuc-ipv6-ra-filter
 
-The package disables forwarding router advertisements on `bat0` which were sent from a different source than the connected gateway. This is based on the output of `batctl gwl` and sets the IPv6 gateway to the IPv4 gateway.
+The package accepts router advertisements from `bat0` only from the selected batman-adv gateway (`batctl gwl`). IPv4 and IPv6 then use the same gateway.
 
-It makes sure that clients only learn the IPv6 gateway of the gateway it is connected to and does not receive other router advertisements in the mesh.
+- The filter applies to the clients (`FORWARD`) and to the node itself (`INPUT`).
+- A Gluon gateway sends its router advertisements from its client MAC address, not from its originator address. The filter accepts the wired client MAC addresses that the gateway announces in the translation table (`batctl tg`).
+- The filter is updated when batman-adv selects a new gateway (`gw` uevent), and once per minute.
+- When the gateway changes on a node without a static client address, the node requests a new DHCPv4 lease and restarts `client6`. The node then drops the addresses and the default route of the old router at once.
+- respondd reports the MAC address of the IPv6 default router of the node in `statistics.gateway6`.
+
+Do not install `gluon-radv-filterd` together with this package. Its chain accepts the router advertisements first.
 
 A node which is a gateway itself (`batctl gw_mode` reports `server`) never selects a gateway and therefore has nothing to filter for. On such a node the filter does not apply and returns to the `FORWARD` chain, which leaves the router advertisements to whatever configures the node as gateway.
 

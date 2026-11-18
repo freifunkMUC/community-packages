@@ -1,0 +1,6 @@
+-- The ipv6-ra-filter script adds the MAC addresses of the selected router to this chain.
+-- The number is above 399-parker-radv-filterd and 401-parker-radv-input, so that
+-- PARKER_RADV drops the router advertisements first on an active Parker node.
+chain('IPV6_RA_FILTER', 'DROP')
+rule('FORWARD -p IPv6 -i bat0 --ip6-protocol ipv6-icmp --ip6-icmp-type router-advertisement -j IPV6_RA_FILTER')
+rule('INPUT -p IPv6 -i bat0 --ip6-protocol ipv6-icmp --ip6-icmp-type router-advertisement -j IPV6_RA_FILTER')

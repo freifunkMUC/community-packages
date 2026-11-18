@@ -8,7 +8,7 @@ PKG_LICENSE:=MIT
 include $(TOPDIR)/../package/gluon.mk
 
 define Package/$(PKG_NAME)
-  TITLE:=Filters router advertisments of any gateway but the connected gateway
+  TITLE:=Accept router advertisements only from the selected batman-adv gateway
   DEPENDS:=+gluon-ebtables +libgluonutil +libbatadv +libnl-tiny
 endef
 

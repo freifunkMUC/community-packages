@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# batman-adv sends a "gw" uevent when the selected gateway changes.
+[ "$ACTION" = change ] || exit 0
+[ "$BATTYPE" = gw ] || exit 0
+
+/lib/gluon/ffmuc-ipv6-ra-filter/ipv6-ra-filter >/dev/null 2>&1 &

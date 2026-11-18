@@ -4,6 +4,7 @@
 #include <libgluonutil.h>
 #include <net/ethernet.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <netlink/netlink.h>
 #include <netlink/genl/genl.h>
@@ -71,32 +72,59 @@ static bool is_batman_gateway() {
 	return opts.is_server;
 }
 
-static struct json_object * get_ipv6_ra_filter() {
-	FILE *f = popen("exec ebtables-tiny -L IPV6_RA_FILTER", "r");
-	char *line = NULL;
-	size_t len = 0;
-	struct ether_addr mac = {};
-	struct ether_addr unspec = {};
-	char macstr[F_MAC_LEN + 1] = "";
+#define DEFAULT_DST "00000000000000000000000000000000"
+#define CLIENT_IF "br-client"
+
+/*
+ * Return the MAC address of the IPv6 default router on the client interface.
+ * The router address is a link-local EUI-64 address, as Gluon uses for its
+ * client bridge. Thus the MAC address is taken from the interface identifier.
+ */
+static struct json_object * get_gateway6(void) {
+	FILE *f = fopen("/proc/net/ipv6_route", "r");
+	char dst[33], nexthop[33], dev[17];
+	unsigned int dst_len;
+	unsigned char iid[8];
+	struct ether_addr mac;
+	char macstr[F_MAC_LEN + 1];
+	int found = 0;
 
 	if (!f)
 		return NULL;
 
-	while (getline(&line, &len, f) > 0) {
-		if (sscanf(line, "-s " F_MAC " -j ACCEPT\n", F_MAC_VAR_REF(mac)) == ETH_ALEN)
-			break;
+	while (fscanf(f, "%32s %x %*s %*s %32s %*s %*s %*s %*s %16s",
+		      dst, &dst_len, nexthop, dev) == 4) {
+		if (dst_len != 0 || strcmp(dst, DEFAULT_DST) != 0)
+			continue;
+		if (strcmp(dev, CLIENT_IF) != 0)
+			continue;
+		if (strncmp(nexthop, "fe80", 4) != 0)
+			continue;
+		if (sscanf(nexthop + 16, "%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx",
+			   &iid[0], &iid[1], &iid[2], &iid[3],
+			   &iid[4], &iid[5], &iid[6], &iid[7]) != 8)
+			continue;
+		if (iid[3] != 0xff || iid[4] != 0xfe)
+			continue;
+
+		found = 1;
+		break;
 	}
-	free(line);
 
-	pclose(f);
+	fclose(f);
 
-	memset(&unspec, 0, sizeof(unspec));
-	if (ether_addr_equal(mac, unspec)) {
+	if (!found)
 		return NULL;
-	} else {
-		snprintf(macstr, sizeof(macstr), F_MAC, F_MAC_VAR(mac));
-		return gluonutil_wrap_string(macstr);
-	}
+
+	mac.ether_addr_octet[0] = iid[0] ^ 0x02;
+	mac.ether_addr_octet[1] = iid[1];
+	mac.ether_addr_octet[2] = iid[2];
+	mac.ether_addr_octet[3] = iid[5];
+	mac.ether_addr_octet[4] = iid[6];
+	mac.ether_addr_octet[5] = iid[7];
+
+	snprintf(macstr, sizeof(macstr), F_MAC, F_MAC_VAR(mac));
+	return gluonutil_wrap_string(macstr);
 }
 
 static struct json_object * respondd_provider_statistics() {
@@ -104,14 +132,14 @@ static struct json_object * respondd_provider_statistics() {
 	struct json_object *gateway6;
 
 	// We are a batman gateway, do not write gateway6: we do not select a
-	// gateway, so the filter chain holds no gateway to report, and the
-	// package that made us a gateway describes our uplink itself.
+	// gateway, and the package that made us a gateway describes our uplink
+	// itself.
 	if (is_batman_gateway())
 		return ret;
 
 	// Only report a gateway when we know one. Writing a null would
 	// override what another respondd module has to say about gateway6.
-	gateway6 = get_ipv6_ra_filter();
+	gateway6 = get_gateway6();
 	if (gateway6)
 		json_object_object_add(ret, "gateway6", gateway6);
 
