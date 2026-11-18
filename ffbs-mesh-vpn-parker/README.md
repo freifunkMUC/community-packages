@@ -42,6 +42,19 @@ This package does not select the uplink. Install one of these packages in your i
 
 Do not install both packages.
 
+Broadcasts after a restart
+--------------------------
+
+batman-adv starts the broadcast sequence number at 1.
+Gluon creates `bat0` again at each boot and at each change of the gateway mode.
+The other nodes keep the old number of the node for about 200 seconds.
+They drop all its broadcasts (also router advertisements) until the new number is higher than the old number.
+This can take a long time.
+
+To prevent this, the node sends 70 small broadcasts directly on `bat0` (UDP to `255.255.255.255`, port 9) each time `bat0` is new.
+It sends them when `bat0` has a neighbour, because batman-adv also counts broadcasts that no neighbour receives.
+The code is in `/etc/hotplug.d/net/50-parker-bcast-burst` and `/usr/share/lua/parker/bcast.lua`.
+
 Client addresses
 ----------------
 

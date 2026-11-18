@@ -1,0 +1,14 @@
+#!/bin/sh
+# shellcheck shell="busybox sh"
+
+# batman-adv has started (bat0 is new, at boot and at each gw_mode change):
+# send a burst of broadcasts, so that the other nodes accept the broadcasts
+# of this node at once. See
+# /usr/share/lua/parker/bcast.lua.
+
+[ "$ACTION" = add ] && [ "$INTERFACE" = bat0 ] || exit 0
+
+(
+	sent=$(lua -e 'print(require("parker.bcast").burst(120))')
+	logger -t parker-bcast "bat0 is new: sent $sent broadcasts"
+) </dev/null >/dev/null 2>&1 &
