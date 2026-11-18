@@ -49,6 +49,17 @@ drop_all() {
 	ebtables-tiny -F "$CHAIN"
 }
 
+# The filter does not know the selected router. Accept all router
+# advertisements, so that the node and the clients keep IPv6.
+accept_all() {
+	if [ "$(ebtables-tiny -L "$CHAIN" | grep -e '-j ' | sed 's/ *$//')" != '-j ACCEPT' ]; then
+		log "$1 Accepting all router advertisements."
+		drop_all
+		ebtables-tiny -A "$CHAIN" -j ACCEPT
+	fi
+	rm -f "$STATE_FILE"
+}
+
 renew_client_config() {
 	local pid
 
@@ -95,12 +106,7 @@ fi
 
 gw="$(get_gateway)"
 if [ -z "$gw" ]; then
-	# Drop all router advertisements, so that the clients do not learn the
-	# router of a different gateway.
-	if ebtables-tiny -L "$CHAIN" | grep -q -e ' -j '; then
-		log "No batman-adv gateway selected. Dropping all router advertisements."
-		drop_all
-	fi
+	accept_all "No batman-adv gateway selected."
 	exit 1
 fi
 
@@ -111,17 +117,19 @@ for _ in 1 2 3 4 5; do
 	sleep 1
 done
 if [ -z "$want" ]; then
-	log "Gateway $gw announces no client MAC address. Dropping all router advertisements."
-	drop_all
+	accept_all "Gateway $gw announces no client MAC address."
 	exit 2
 fi
 
-rules="$(ebtables-tiny -L "$CHAIN" | grep -e ' -j ')"
+rules="$(ebtables-tiny -L "$CHAIN" | grep -e '-j ')"
 have="$(echo "$rules" | sed -n 's/^-s \([0-9a-f:]*\) -j ACCEPT *$/\1/p' | tr '\n' ' ')"
-if echo "$rules" | grep -q -v -e '^-s [0-9a-f:]* -j ACCEPT *$'; then
+accept_rule=0
+if [ -n "$rules" ] && echo "$rules" | grep -q -v -e '^-s [0-9a-f:]* -j ACCEPT *$' -e '^-j ACCEPT *$'; then
 	# Remove rules that this version of the script does not create
 	drop_all
 	have=""
+elif echo "$rules" | grep -q -e '^-j ACCEPT *$'; then
+	accept_rule=1
 fi
 
 changed=0
@@ -137,6 +145,10 @@ for mac in $have; do
 	ebtables-tiny -D "$CHAIN" -s "$mac" -j ACCEPT
 	changed=1
 done
+if [ "$accept_rule" = 1 ]; then
+	ebtables-tiny -D "$CHAIN" -j ACCEPT
+	changed=1
+fi
 [ "$changed" = 1 ] && log "Accepting router advertisements of gateway $gw from: $want"
 
 old_gw="$(cat "$STATE_FILE" 2>/dev/null)"

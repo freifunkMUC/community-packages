@@ -33,10 +33,12 @@ A mesh-only node must accept router advertisements from one uplink only.
 Otherwise the node takes the prefixes of all uplinks, but uses only one default route.
 This package does not select the uplink. Install one of these packages in your image:
 
-* `gluon-radv-filterd`: selects the router with its own metric.
-  This package then also filters the router advertisements to the node itself.
 * `ffmuc-ipv6-ra-filter`: selects the router of the batman-adv gateway (IPv4).
+  This applies to the clients and to the node itself.
   IPv4 and IPv6 then use the same uplink.
+* `gluon-radv-filterd`: selects the router with its own metric.
+  This applies only to the clients.
+  The node itself still takes the prefixes of all uplinks.
 
 Do not install both packages.
 
