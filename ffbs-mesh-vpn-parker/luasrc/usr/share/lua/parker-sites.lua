@@ -490,12 +490,17 @@ end
 
 -- Addresses, rules, firewall, routes, CLAT, RA and DNS for the current state.
 local function apply(conf, names, db, iface, tbl, up, active, now)
-	local rules = { "pref " .. RULE_MIN .. " lookup main suppress_prefixlength 0" }
+	-- Clients skip the main table: netifd puts an unreachable route on the
+	-- WAN prefix there, and this route would hide the tunnel from them.
+	local rules = { "pref " .. RULE_MIN .. " not iif " .. CLIENT_IF .. " lookup main suppress_prefixlength 0" }
 	db.addrs = {}
 	for i, name in ipairs(names) do
 		local site = conf.sites[name]
 		sh("ip -6 addr replace " .. site.address6 .. "/64 dev " .. CLIENT_IF .. " nodad")
 		table.insert(db.addrs, site.address6)
+		-- Client to client stays on br-client, also between sites.
+		table.insert(rules, "pref " .. (RULE_MIN + 50 + i) .. " iif " .. CLIENT_IF .. " to " .. site.range6
+			.. " lookup main")
 		if iface[name] then
 			-- The site address as /128 on the tunnel: the probe source.
 			sh("ip -6 addr replace " .. site.address6 .. "/128 dev " .. iface[name])
@@ -526,6 +531,7 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 	-- record of noderoute, so that noderoute takes the route as its own.
 	if active and iface[active] then
 		sh("ip -6 route replace default dev " .. iface[active] .. " proto 23")
+		sh("ip -6 route replace default dev " .. iface[active] .. " proto 23 table 23")
 		local conc = find_by(conf.concentrators, "id", conf.sites[active].concentrator)
 		local route4 = util.read_file(ROUTE4_FILE)
 		if conc and conc.address4 and route4 and not route4:find("dev " .. iface[active] .. " ", 1, true) then

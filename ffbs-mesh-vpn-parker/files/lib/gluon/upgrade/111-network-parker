@@ -30,6 +30,17 @@ uci:section('network', 'route6', 'client6_unreachable', {
 	metric = 65535,
 })
 
+-- IPv6 traffic forwarded from clients uses the tunnel (table 23) first.
+-- The main table has an unreachable route for the WAN prefix (netifd
+-- loop guard for offlink addresses). Without this rule, clients cannot
+-- reach hosts in the WAN prefix (e.g. the home network of the node).
+-- Without a tunnel, table 23 is empty and the main table applies.
+uci:section('network', 'rule6', 'client6_tunnel', {
+	['in'] = 'client',
+	lookup = 23,
+	priority = 14000,
+})
+
 -- place ipv4 wan routes into table 1
 uci:set('network', 'wan', 'ip4table', 1)
 

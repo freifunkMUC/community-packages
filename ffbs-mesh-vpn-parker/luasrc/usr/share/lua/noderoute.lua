@@ -5,6 +5,8 @@ local util = require("util")
 local uci = require("uci")
 
 local RT_PROTO = "23"
+-- IPv6 routing table for traffic forwarded from clients (see 111-network-parker)
+local CLIENT_TABLE = "23"
 
 local tmpdir = arg[1]
 
@@ -117,6 +119,21 @@ local function get_wg_routes()
 	return result
 end
 
+local function set_client_route(iface, conc)
+	-- Clients use this table for IPv6 before the main table: there, netifd
+	-- puts an unreachable route on the WAN prefix of the node.
+	return os.execute(
+		"ip -6 r replace default via "
+			.. conc["address6"]
+			.. " dev "
+			.. iface
+			.. " proto "
+			.. RT_PROTO
+			.. " table "
+			.. CLIENT_TABLE
+	)
+end
+
 local function set_wg_route(iface, conc, mtu4)
 	-- Route our clients through a tunnel. An IPv4 MTU is put on the route
 	-- rather than on the interface, which carries IPv6 as well: only the
@@ -132,8 +149,9 @@ local function set_wg_route(iface, conc, mtu4)
 	if res == 0 then
 		util.write_file(ROUTE4_FILE, route4)
 	end
-	return res
+	res = res
 		+ os.execute("ip -6 r replace default via " .. conc["address6"] .. " dev " .. iface .. " proto " .. RT_PROTO)
+	return res + set_client_route(iface, conc)
 end
 
 local function find_concentrator(conf, iface)
@@ -603,6 +621,11 @@ local function update(report)
 				set_wg_route(current.iface, conc, route_mtu4)
 			end
 		end
+		-- The multi-site operation can move the route; follow it.
+		local client_conc = find_concentrator(conf, current.iface)
+		if client_conc ~= nil then
+			set_client_route(current.iface, client_conc)
+		end
 		util.log("current route still active. Doing nothing.")
 		report:write("active (idle) via " .. current.iface .. note)
 		return
@@ -635,6 +658,7 @@ local function update(report)
 				end
 			end
 		end
+		os.execute("ip -6 r del default table " .. CLIENT_TABLE .. " proto " .. RT_PROTO .. " 2>/dev/null")
 		report:write("inactive")
 		return
 	end
