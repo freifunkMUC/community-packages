@@ -245,6 +245,10 @@ local function stored_address(conf, network)
 	return nil
 end
 
+-- Another node that has used address4 in the last DAT_MAX_AGE seconds:
+-- its MAC and the age of the sighting, or nil.
+clientaddr.claim = dat_claim
+
 function clientaddr.select(conf, tmpdir)
 	-- The address to configure on br-client. Only call this while the node
 	-- is routing for its clients: a node that only meshes takes its client

@@ -58,6 +58,20 @@ Thus the node first sends one test broadcast per second. It sends the 70 broadca
 The code is in `/etc/hotplug.d/net/50-parker-bcast-burst` and `/usr/share/lua/parker/bcast.lua`.
 `lua5.1 tests/bcast-sim.lua` (in the package directory) simulates the probe and the burst with mock modules.
 
+DHCPv4 after a gateway change
+-----------------------------
+
+The node gives leases of 2 minutes to its clients. A client renews its lease after 1 minute.
+
+When the node stops routing for its clients, it keeps its old client address for 150 seconds (`/32` on `br-client`).
+In this time, dnsmasq answers each renewal with a DHCPNAK and ignores each DHCPDISCOVER.
+The client then gets a new lease from an active uplink.
+Without the DHCPNAK, the client keeps the old uplink as its router until the lease runs out.
+The node does not keep the address when batman-adv has seen another node with this address in the last 60 seconds (an uplink that has become active with the same address).
+It does a check at each `noderoute` cycle (at most 30 seconds apart).
+
+The code is in `/usr/share/lua/parker/dhcpnak.lua`.
+
 Client addresses
 ----------------
 
