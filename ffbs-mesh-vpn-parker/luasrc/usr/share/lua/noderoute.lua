@@ -2,6 +2,8 @@ local clientaddr = require("clientaddr")
 local dhcp = require("parker.dhcp")
 local dhcpnak = require("parker.dhcpnak")
 local json = require("jsonc")
+local ragoodbye = require("parker.ragoodbye")
+local stat = require("posix.sys.stat")
 local util = require("util")
 local uci = require("uci")
 
@@ -351,6 +353,9 @@ local function apply_network(conf, target_state, address4, mtu)
 
 		if uci.get("network", DHCP_IFACE, "proto") == "static" then
 			nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
+			-- Before gw_mode client: the mesh nodes only pass on the RAs
+			-- of their selected gateway.
+			ragoodbye.send()
 		end
 		uci_set("network", DHCP_IFACE, "proto", "dhcp")
 		-- dnsmasq stops its DHCPD-job when the interface is not 'proto static'
@@ -548,6 +553,20 @@ local function apply_network(conf, target_state, address4, mtu)
 	return true
 end
 
+-- Multi-site operation: parker-sites probes each site every second. When no
+-- site is up, our tunnels may still have a recent handshake, but they do
+-- not route. Only trust a status that parker-sites has written recently.
+local SITES_STATUS = "/tmp/parker-sites/status"
+local SITES_STATUS_MAX_AGE = 30
+
+local function no_site_up()
+	local st = stat.stat(SITES_STATUS)
+	if not st or os.time() - st.st_mtime > SITES_STATUS_MAX_AGE then
+		return false
+	end
+	return (util.read_file(SITES_STATUS) or ""):find("\nactive=nil\n", 1, true) ~= nil
+end
+
 local function update(report)
 	dhcpnak.expire()
 
@@ -564,6 +583,11 @@ local function update(report)
 		if elem[1] < 180 then
 			table.insert(active, elem[2])
 		end
+	end
+
+	if #active > 0 and no_site_up() then
+		util.log("parker-sites: no site is up")
+		active = {}
 	end
 
 	local conf_json = util.read_file(CONFIG_FILE)

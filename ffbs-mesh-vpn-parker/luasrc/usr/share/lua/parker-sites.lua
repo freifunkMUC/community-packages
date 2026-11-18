@@ -76,19 +76,26 @@ local T = {
 	penalty_max = 600,
 	full_every = 10,
 	report_retry = 3,
-	preferred = 300,
+	-- Same as ra_lifetime: a client must not keep a preferred address of a
+	-- node after the route through that node has ended. The other nodes
+	-- drop traffic from a source address that is not theirs.
+	preferred = 180,
 	valid = 600,
 	dead_keep = 180,
 	keepalive = 25,
 	-- Router lifetime and RA interval. After a roam, the old node stays the
-	-- router of a client (through the mesh) until the router lifetime ends,
-	-- so keep it at or below the preferred lifetime. Android 14 and later
+	-- router of a client (through the mesh) until the router lifetime ends.
+	-- Keep it equal to the preferred lifetime. Android 14 and later
 	-- ignore lifetimes below 180 s (accept_ra_min_lft). uradvd sets the
-	-- PREF64 lifetime to 3 x max interval, rounded down to 8 s: 296 s.
+	-- PREF64 lifetime to 3 x max interval, rounded down to 8 s: 176 s.
 	-- A state change does not wait for the interval: SIGHUP sends RAs at once.
-	ra_lifetime = 300,
-	ra_min_interval = 33,
-	ra_max_interval = 100,
+	-- A node that stops routing sends router lifetime 0 (noderoute). The
+	-- lifetime only counts when the node stops without that (power loss).
+	-- 180 s is the lowest value Android accepts; with RAs at most 60 s
+	-- apart, the clients can lose two RAs in a row.
+	ra_lifetime = 180,
+	ra_min_interval = 20,
+	ra_max_interval = 60,
 }
 
 util.loggername = "parker-sites"
