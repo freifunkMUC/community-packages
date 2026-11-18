@@ -1,0 +1,11 @@
+-- Filter the router advertisements to the node itself, as 399-parker-radv-filterd
+-- does for the clients. Without this, odhcp6c on client6 takes the prefixes of
+-- all uplinks, but sets only one default route.
+rule('INPUT -p IPv6 -i bat0 --ip6-protocol ipv6-icmp --ip6-icmp-type router-advertisement -j PARKER_RADV')
+
+-- gluon-radv-filterd is optional. Use its chain only when it is installed.
+local radv_filterd = io.open('/lib/gluon/ebtables/400-radv-filterd')
+if radv_filterd then
+	radv_filterd:close()
+	rule('INPUT -p IPv6 -i bat0 --ip6-protocol ipv6-icmp --ip6-icmp-type router-advertisement -j RADV_FILTER')
+end
