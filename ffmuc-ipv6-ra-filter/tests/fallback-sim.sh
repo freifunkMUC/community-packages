@@ -35,6 +35,8 @@ setup() {
 		"$R1" "$O1" "$R2" "$O2" > "$SIM/tg"
 	sed -e "s#/proc/uptime#$SIM/uptime#" -e "s#/tmp/ffmuc#$SIM/ffmuc#g" -e "s#/var/lock/#$SIM/#" \
 		-e "s#/var/run/#$SIM/#" -e "s#/usr/sbin/uradvd#$SIM/bin/uradvd#" \
+		-e "s#/tmp/range6#$SIM/range6#" -e "s#/tmp/parker-sites/#$SIM/#" \
+		-e 's#< "/proc/$pid/cmdline"#< "$SIM/proc/$pid/cmdline"#' \
 		-e 's#(sleep "$1"; exec "$0") >/dev/null 2>&1 &#echo "$1" > "$SIM/timer"; return#' \
 		"$SCRIPT" > "$SIM/filter"
 	mocks
@@ -52,7 +54,7 @@ EOF
 	cat > "$SIM/bin/batctl" <<'EOF'
 #!/bin/sh
 case "$1" in
-gw_mode) echo client ;;
+gw_mode) cat "$SIM/mode" 2>/dev/null || echo client ;;
 gwl) [ -s "$SIM/gw" ] && echo "* $(cat "$SIM/gw") ( 255) x [ primary0]: 10.0/2.0 MBit" ;;
 tg) cat "$SIM/tg" ;;
 esac
@@ -121,6 +123,10 @@ grep -q -x -e "-s $1 -j ACCEPT" -e "-j ACCEPT" "$SIM/ebt" || exit 0
 grep -q -x -F "$1" "$SIM/ipt" && echo $(($(cat "$SIM/ra_count") + 1)) > "$SIM/ra_count"
 grep -v -x -F "$1" "$SIM/known" > "$SIM/known.n"; echo "$1" >> "$SIM/known.n"; mv "$SIM/known.n" "$SIM/known"
 EOF
+	cat > "$SIM/bin/pidof" <<'EOF'
+#!/bin/sh
+ls "$SIM/proc" 2>/dev/null
+EOF
 	cat > "$SIM/bin/uradvd" <<'EOF'
 #!/bin/sh
 echo "$* | drop: $(cat "$SIM/drop")" >> "$SIM/uradvd"
@@ -130,8 +136,10 @@ EOF
 }
 
 # The script does not wait in the simulation
-fast_sleep() { printf '#!/bin/sh\nexit 0\n' > "$SIM/bin/sleep"; chmod +x "$SIM/bin/sleep"; }
-slow_sleep() { printf '#!/bin/sh\n/bin/sleep 0.05\n' > "$SIM/bin/sleep"; }
+# "sleep 8" is the uradvd run of the deprecation job. Give the mocked uradvd
+# time to write its log before the job stops it.
+fast_sleep() { printf '#!/bin/sh\n[ "$1" = 8 ] && /bin/sleep 0.3\nexit 0\n' > "$SIM/bin/sleep"; chmod +x "$SIM/bin/sleep"; }
+slow_sleep() { printf '#!/bin/sh\n[ "$1" = 8 ] && /bin/sleep 0.3\n/bin/sleep 0.05\n' > "$SIM/bin/sleep"; }
 
 at() { echo "$1.00 0.00" > "$SIM/uptime"; }
 run() { PATH="$SIM/bin:$PATH" sh "$SIM/filter" >/dev/null 2>&1; }
@@ -144,7 +152,7 @@ job_alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
 # Wait until the background job of deprecate_old_prefixes ends
 wait_job() {
 	j=$(job_pid)
-	for _ in $(seq 100); do job_alive "$j" || return 0; /bin/sleep 0.1; done
+	for _ in $(seq 300); do job_alive "$j" || return 0; /bin/sleep 0.1; done
 }
 routes() { PATH="$SIM/bin:$PATH" ip -6 route show default dev br-client; }
 
@@ -254,6 +262,67 @@ check "the old job is stopped" '! job_alive "$job"'
 fast_sleep
 wait_job
 check "no uradvd" '[ ! -s "$SIM/uradvd" ]'
+
+# The router advertisement daemon of the gateway: $1 is its command line
+daemon() { mkdir -p "$SIM/proc/100"; printf '%s' "$1" | tr ' ' '\0' > "$SIM/proc/100/cmdline"; }
+
+echo "7. An uplink was a gateway client of O2 and becomes a gateway again. It"
+echo "   deprecates the prefix of O2 on its clients and keeps its router lifetime."
+setup
+up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run                   # gateway client: R2 gives 2001:db8:2::/64
+check "check again after 10 s" '[ "$(cat "$SIM/timer" 2>/dev/null)" = 10 ]'
+at 110; run
+echo server > "$SIM/mode"
+printf '2001:db8:1::/64\n' > "$SIM/range6"
+daemon "uradvd -i br-client --default-lifetime 180 -a 2001:db8:1::/64"
+mkdir -p "$SIM/proc/101"      # ragoodbye: it is not the daemon
+printf 'uradvd -i br-client --default-lifetime 0 --preferred-lifetime 0 -a x' | tr ' ' '\0' > "$SIM/proc/101/cmdline"
+at 200; run; wait_job
+check "uradvd deprecates only the old prefix, with the router lifetime of the daemon" \
+	'grep -q -e "^-i br-client --default-lifetime 180 --preferred-lifetime 0 --valid-lifetime 0 .* -a 2001:db8:2::/64 |" "$SIM/uradvd" &&
+	! grep -q "2001:db8:1::" "$SIM/uradvd" && [ "$(wc -l < "$SIM/uradvd")" -eq 1 ]'
+check "the filter does not filter router advertisements" 'grep -q -x -e "-j RETURN" "$SIM/ebt"'
+at 300; run; wait_job
+check "only one deprecation" '[ "$(wc -l < "$SIM/uradvd")" -eq 1 ]'
+
+echo "8. Multi-site uplink: the own prefixes come from the parker-sites state."
+setup
+up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; at 110; run
+echo server > "$SIM/mode"
+printf '2001:db8:3::/64,0,600\n2001:db8:2::/64,1800,600\n' > "$SIM/ra-state"
+daemon "uradvd -i br-client --state-file x --default-lifetime 180"
+at 200; run; wait_job
+check "no uradvd: the uplink announces the same prefix" '[ ! -s "$SIM/uradvd" ]'
+
+echo "9. No router advertisement daemon runs on the uplink. The job does not send"
+echo "   router lifetime 0 from the router address."
+setup
+up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; at 110; run
+echo server > "$SIM/mode"
+printf '2001:db8:1::/64\n' > "$SIM/range6"
+at 200; run; wait_job
+check "no uradvd" '[ ! -s "$SIM/uradvd" ]'
+
+echo "10. batman-adv sends the gw uevent before it sets the server mode. The"
+echo "    script checks again soon."
+setup
+up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; at 110; run
+: > "$SIM/gw"
+at 200; run
+check "check again after 3 s" '[ "$(cat "$SIM/timer" 2>/dev/null)" = 3 ]'
+echo server > "$SIM/mode"
+printf '2001:db8:1::/64\n' > "$SIM/range6"
+daemon "uradvd -i br-client --default-lifetime 180 -a 2001:db8:1::/64"
+at 203; run; wait_job
+check "uradvd deprecates the old prefix" 'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd"'
 
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi

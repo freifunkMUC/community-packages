@@ -37,6 +37,10 @@ DEPRECATE_DURATION=8
 # Lower than the valid lifetime on the clients: they ignore a lower valid
 # lifetime (RFC 4862, 5.5.3 e) and keep the prefix as deprecated
 DEPRECATE_VALID=600
+# Prefixes of the node while it is a batman gateway client
+PREFIX_FILE=/tmp/ffmuc-ipv6-ra-filter.prefixes
+PARKER_RA_STATE=/tmp/parker-sites/ra-state
+PARKER_RANGE6=/tmp/range6
 
 log() {
 	logger -t ipv6_ra_filter "$*"
@@ -171,6 +175,35 @@ get_prefixes() {
 		awk '$1 ~ /\/64$/ && $1 !~ /^fe80:/ { print $1 }' | sort -u | tr '\n' ' '
 }
 
+# Prefixes that the node announces as a gateway: of all sites, else the single one
+get_own_prefixes() {
+	local prefixes
+
+	prefixes="$(sed -n 's#^\([0-9a-fA-F:]*/[0-9]*\),.*#\1#p' "$PARKER_RA_STATE" 2>/dev/null)"
+	[ -n "$prefixes" ] || prefixes="$(sed -n 's#^[[:space:]]*\([0-9a-fA-F:]*/[0-9]*\).*#\1#p' "$PARKER_RANGE6" 2>/dev/null)"
+	echo "$prefixes" | grep . | sort -u | tr '\n' ' '
+}
+
+# Router lifetime of the router advertisement daemon of the gateway. Empty if
+# no daemon runs. uradvd sends router lifetime 0 when the option is not set.
+get_router_lifetime() {
+	local pid args
+
+	for pid in $(pidof uradvd); do
+		args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+		# Not the router advertisements of ragoodbye or of this script
+		case "$args" in
+			*"--preferred-lifetime 0 "*) continue ;;
+		esac
+		echo "$args" | awk '{
+			for (i = 1; i < NF; i++)
+				if ($i == "--default-lifetime") { print $(i + 1); exit }
+			print 0
+		}'
+		return 0
+	done
+}
+
 own_ra_rule() {
 	local lladdr
 
@@ -204,23 +237,42 @@ stop_deprecate() {
 
 # Tell the clients that the prefixes of the old router are deprecated. They
 # then use an address of the new router for new connections, and the old
-# router does not get their traffic. The node sends router advertisements from
-# its own link-local address with router lifetime 0 and preferred lifetime 0
-# for each old prefix. Other mesh nodes and the uplinks drop these router
-# advertisements, because they accept only the router of their gateway. Wait
-# for a new prefix first: if the new router announces the same prefix, the node
-# must not deprecate it.
+# router does not get their traffic. Wait for a new prefix first: if the new
+# router announces the same prefix, the node must not deprecate it.
+#
+# $1: old prefixes. $2: the selected gateway (empty on a gateway); the job
+# stops when it changes. $3: client or server.
+#
+# client: the node sends router advertisements from its own link-local address
+# with router lifetime 0 and preferred lifetime 0 for each old prefix. Other
+# mesh nodes and the uplinks drop them, because they accept only the router of
+# their gateway.
+#
+# server: the node became a gateway. Its clients can still have the prefix of
+# the gateway that the node used before. The router advertisements come from
+# the router address of the node, so they use the router lifetime of its
+# router advertisement daemon. The mesh nodes that selected this node pass
+# them on. Thus use valid lifetime 0: nodes and clients that do not know the
+# old prefix ignore it (RFC 4862, 5.5.3 d), and the others only deprecate it.
 deprecate_old_prefixes() {
 	local old="$1" new="" stale="" args="" prefix rule waited=0
+	local lifetime=0 valid="$DEPRECATE_VALID"
 
 	while [ "$waited" -lt "$DEPRECATE_WAIT" ]; do
-		new="$(get_prefixes)"
-		for prefix in $new; do
-			contains "$old" "$prefix" || break 2
-		done
+		if [ "$3" = server ]; then
+			lifetime="$(get_router_lifetime)"
+			new="$(get_own_prefixes)"
+			[ -n "$lifetime" ] && [ -n "$new" ] && break
+		else
+			new="$(get_prefixes)"
+			for prefix in $new; do
+				contains "$old" "$prefix" || break 2
+			done
+		fi
 		sleep 1
 		waited=$((waited + 1))
 	done
+	[ "$3" = server ] && { [ -n "$lifetime" ] && [ -n "$new" ] || return 0; valid=0; }
 	for prefix in $old; do
 		contains "$new" "$prefix" && continue
 		stale="$stale $prefix"
@@ -237,12 +289,17 @@ deprecate_old_prefixes() {
 		ipt -I $rule
 	fi
 	# shellcheck disable=SC2086
-	"$URADVD" -i br-client --default-lifetime 0 --preferred-lifetime 0 \
-		--valid-lifetime "$DEPRECATE_VALID" \
+	"$URADVD" -i br-client --default-lifetime "$lifetime" --preferred-lifetime 0 \
+		--valid-lifetime "$valid" \
 		--min-router-adv-interval 3 --max-router-adv-interval 4 $args >/dev/null 2>&1 &
 	echo "$!" > "$DEPRECATE_FILE"
 	sleep "$DEPRECATE_DURATION"
 	cleanup_deprecate
+}
+
+start_deprecate() {
+	(trap - EXIT; deprecate_old_prefixes "$@") >/dev/null 2>&1 &
+	echo "$!" > "$DEPRECATE_FILE.job"
 }
 
 lock "$LOCK_FILE"
@@ -267,11 +324,24 @@ if batctl gw_mode 2>/dev/null | grep -qw '^server'; then
 		ebtables-tiny -A "$CHAIN" -j RETURN
 	fi
 	rm -f "$STATE_FILE"
+	old_prefixes="$(cat "$PREFIX_FILE" 2>/dev/null)"
+	if [ -n "$old_prefixes" ]; then
+		# The node was a gateway client before
+		stop_deprecate
+		[ -x "$URADVD" ] && start_deprecate "$old_prefixes" "" server
+	fi
+	rm -f "$PREFIX_FILE"
 	exit 0
 fi
 
+prefixes="$(get_prefixes)"
+[ -n "$prefixes" ] && echo "$prefixes" > "$PREFIX_FILE"
+
 gw="$(get_gateway)"
 if [ -z "$gw" ]; then
+	# batman-adv sends the uevent before it sets the server mode. Check again
+	# soon, so that the old prefixes are deprecated if the node is a gateway now.
+	[ -f "$STATE_FILE" ] && schedule_check 3
 	accept_all "No batman-adv gateway selected."
 	exit 1
 fi
@@ -428,7 +498,8 @@ log "Gateway changed from ${old_gw:-none} to $gw. Renewing DHCPv4 and IPv6 confi
 stop_deprecate
 old_prefixes="$(get_prefixes)"
 renew_client_config
+# Save the new prefixes soon. The node needs them if it becomes a gateway.
+schedule_check 10
 if [ -n "$old_gw" ] && [ -n "$old_prefixes" ] && [ -x "$URADVD" ]; then
-	(trap - EXIT; deprecate_old_prefixes "$old_prefixes" "$gw") >/dev/null 2>&1 &
-	echo "$!" > "$DEPRECATE_FILE.job"
+	start_deprecate "$old_prefixes" "$gw" client
 fi
