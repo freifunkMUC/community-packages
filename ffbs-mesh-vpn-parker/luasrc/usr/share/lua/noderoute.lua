@@ -343,6 +343,11 @@ local function apply_network(conf, target_state, address4, mtu)
 		if not util.check_output("ebtables-tiny -L PARKER_RADV"):find("DROP") then
 			os.execute("ebtables-tiny -A PARKER_RADV -j DROP")
 		end
+		-- Our clients must not renew a lease of another uplink (see
+		-- /lib/gluon/ebtables/402-parker-dhcp-renew).
+		if not util.check_output("ebtables-tiny -L PARKER_DHCP"):find("DROP") then
+			os.execute("ebtables-tiny -A PARKER_DHCP -j DROP")
+		end
 		if util.read_file("/tmp/parker_online") == nil then
 			os.execute("touch /tmp/parker_online")
 			first_time_active_since_boot = true
@@ -378,6 +383,7 @@ local function apply_network(conf, target_state, address4, mtu)
 		end
 
 		os.execute("ebtables-tiny -F PARKER_RADV")
+		os.execute("ebtables-tiny -F PARKER_DHCP")
 	end
 
 	local changed = sections_changed()
@@ -400,6 +406,14 @@ local function apply_network(conf, target_state, address4, mtu)
 		util.sleep(1)
 		util.log("HACK: continuing with network reload")
 		os.execute("/etc/init.d/network reload")
+		if not target_state then
+			-- The reload restarted odhcp6c. Tell ffmuc-ipv6-ra-filter, so
+			-- that it does not restart odhcp6c again while it starts.
+			local uptime = util.read_file("/proc/uptime")
+			if uptime then
+				util.write_file("/tmp/ffmuc-ipv6-ra-filter.client6", uptime:match("^%d+") .. "\n")
+			end
+		end
 		util.log("Network reload finished. Waiting for " .. DHCP_IFACE .. " to be reconfigured...")
 		if util.wait_for(function()
 			return network_applied(address4, target_state)

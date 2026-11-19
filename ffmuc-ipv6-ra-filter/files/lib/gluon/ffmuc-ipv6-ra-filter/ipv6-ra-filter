@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# Usage: ipv6-ra-filter [mesh-ready]
+# mesh-ready: bat0 is new and the mesh carries the broadcasts and multicasts of
+# the node again (ffbs-mesh-vpn-parker, parker-bcast).
+#
 # Accept router advertisements only from the batman-adv gateway that is selected
 # for IPv4. The gateway sends its router advertisements from its client MAC
 # address, not from its originator address. Thus accept the MAC addresses that
@@ -14,6 +18,15 @@ FALLBACK_FILE=/tmp/ffmuc-ipv6-ra-filter.fallback
 RA_FILE=/tmp/ffmuc-ipv6-ra-filter.ra
 TIMER_FILE=/tmp/ffmuc-ipv6-ra-filter.timer
 SOLICIT_FILE=/tmp/ffmuc-ipv6-ra-filter.solicit
+# PID of a run that renews the DHCPv4 and IPv6 configuration without the lock
+RENEW_FILE=/tmp/ffmuc-ipv6-ra-filter.renew
+# Time of the last restart of odhcp6c (ifup client6)
+CLIENT6_FILE=/tmp/ffmuc-ipv6-ra-filter.client6
+# Time in seconds that odhcp6c can need after a restart before client6 is up.
+# odhcp6c sends its router solicitation after 0, 4, 8 and 12 seconds, and
+# netifd sets client6 up about 11 seconds after the restart. A restart in this
+# time stops all of this, so do not restart odhcp6c before.
+CLIENT6_START=15
 COUNT_CHAIN=ffmuc_ra_count
 # Time in seconds that the node can be without a default route through the
 # selected router before the filter accepts all routers
@@ -22,11 +35,42 @@ FALLBACK_DELAY=30
 # the node sends a new router solicitation. The router solicitation at a
 # gateway change can come before the router of the new gateway is ready.
 SOLICIT_DELAY=10
+# Time in seconds for the first and the second new router solicitation. The
+# first ones after a gateway change can fail, because the DHCPv4 renewal and
+# the new DHCPv4 lease reload the firewall.
+SOLICIT_FIRST=3
+SOLICIT_SECOND=6
 # Maximum router advertisement interval of the gateways. When no router
 # advertisement of the selected router arrives for 3 intervals, the filter
 # accepts all routers.
 MAX_RA_INTERVAL=60
 RA_TIMEOUT=$((3 * MAX_RA_INTERVAL))
+DEPRECATE_FILE=/tmp/ffmuc-ipv6-ra-filter.deprecate
+URADVD=/usr/sbin/uradvd
+# Time in seconds to wait for a prefix of the new router after a gateway change
+DEPRECATE_WAIT=45
+# uradvd sends one router advertisement at start and the next ones 3 to 4
+# seconds apart
+DEPRECATE_DURATION=8
+# Lower than the valid lifetime on the clients: they ignore a lower valid
+# lifetime (RFC 4862, 5.5.3 e) and keep the prefix as deprecated
+DEPRECATE_VALID=600
+# Time in seconds to wait for the prefix of the new router after its first
+# router advertisement
+DEPRECATE_GRACE=2
+# Prefixes of the node while it is a batman gateway client
+PREFIX_FILE=/tmp/ffmuc-ipv6-ra-filter.prefixes
+PARKER_RA_STATE=/tmp/parker-sites/ra-state
+PARKER_RANGE6=/tmp/range6
+# Default routers of the node while it is a batman gateway client
+ROUTER_FILE=/tmp/ffmuc-ipv6-ra-filter.routers
+RA_GOODBYE=/lib/gluon/ffmuc-ipv6-ra-filter/ra-goodbye
+BRIF_DIR=/sys/class/net/br-client/brif
+BR_ADDRESS=/sys/class/net/br-client/address
+# The last default routers and prefixes of the node as a gateway client
+# (ROUTERS|PREFIXES). On flash, so that the node knows them after a reboot or a
+# network reload. Written only when they change.
+LAST_FILE=/etc/ffmuc-ipv6-ra-filter.last
 
 log() {
 	logger -t ipv6_ra_filter "$*"
@@ -67,17 +111,98 @@ uptime_s() {
 	cut -d. -f1 /proc/uptime
 }
 
-# MAC addresses of the IPv6 default routers of the node
-get_default_router_macs() {
+# IPv6 default routers of the node that have a known MAC address, as
+# LLADDR,MAC. The routes come from the router advertisements, so these are the
+# source addresses of the router advertisements.
+get_default_routers() {
 	ip -6 route show default dev br-client 2>/dev/null | awk '{
 		for (i = 1; i < NF; i++)
 			if ($i == "via") print $(i + 1)
 	}' | while read -r router; do
-		ip -6 neigh show dev br-client to "$router" | awk '{
+		ip -6 neigh show dev br-client to "$router" | awk -v r="$router" '{
 			for (i = 1; i < NF; i++)
-				if ($i == "lladdr") print $(i + 1)
+				if ($i == "lladdr") print r "," $(i + 1)
 		}'
 	done
+}
+
+# MAC addresses of the IPv6 default routers of the node
+get_default_router_macs() {
+	get_default_routers | sed 's/.*,//'
+}
+
+last_routers() {
+	sed -n 's/|.*//p' "$LAST_FILE" 2>/dev/null
+}
+
+last_prefixes() {
+	sed -n 's/.*|//p' "$LAST_FILE" 2>/dev/null
+}
+
+# Time of the next router solicitation. $1: the time since when the default
+# route is missing. SOLICIT_FILE has the number of router solicitations since
+# then and the time of the last one. Measure from the last one: a run that
+# comes late (it waited for the lock) must not send the next steps back to
+# back, because each one restarts odhcp6c.
+next_solicit() {
+	local n="" last=""
+
+	read -r n last 2>/dev/null < "$SOLICIT_FILE"
+	[ -n "$last" ] || { n=0; last="$1"; }
+	case "$n" in
+		0) echo $((last + SOLICIT_FIRST)) ;;
+		1) echo $((last + SOLICIT_SECOND - SOLICIT_FIRST)) ;;
+		2) echo $((last + SOLICIT_DELAY - SOLICIT_SECOND)) ;;
+		*) return 1 ;;
+	esac
+}
+
+# Restart odhcp6c: it forgets all routers and sends a router solicitation
+restart_client6() {
+	uptime_s > "$CLIENT6_FILE"
+	ifup client6
+}
+
+client6_up() {
+	case "$(ubus -S call network.interface.client6 status 2>/dev/null)" in
+		*'"up":true'*) return 0 ;;
+	esac
+	return 1
+}
+
+# odhcp6c was restarted less than CLIENT6_START seconds ago, and client6 is not
+# up yet. Prints the time when this ends. ffbs-mesh-vpn-parker also writes
+# CLIENT6_FILE when its network reload restarts client6.
+client6_starting() {
+	local t
+
+	t="$(cat "$CLIENT6_FILE" 2>/dev/null)"
+	[ -n "$t" ] && [ "$(uptime_s)" -lt $((t + CLIENT6_START)) ] || return 1
+	client6_up && return 1
+	echo $((t + CLIENT6_START))
+}
+
+# A gateway change run renews the configuration. It sends a router
+# solicitation itself (ifup client6).
+renew_running() {
+	local pid
+
+	pid="$(cat "$RENEW_FILE" 2>/dev/null)"
+	[ -n "$pid" ] && grep -q -F "$0" "/proc/$pid/cmdline" 2>/dev/null
+}
+
+# Ports of br-client with local clients: not the mesh (bat0) and not the node
+# itself (local-port)
+get_client_ports() {
+	local port
+
+	for port in "$BRIF_DIR"/*; do
+		port="${port##*/}"
+		case "$port" in
+			bat0|local-port|'*') ;;
+			*) echo "$port" ;;
+		esac
+	done | tr '\n' ' '
 }
 
 # Run the script again after $1 seconds. Only one timer runs, unless the new
@@ -152,8 +277,186 @@ renew_client_config() {
 	fi
 
 	# Remove the addresses and the default route of the old router at once.
-	ifup client6
+	restart_client6
 }
+
+# On-link prefixes of the node
+get_prefixes() {
+	ip -6 route show dev br-client 2>/dev/null |
+		awk '$1 ~ /\/64$/ && $1 !~ /^fe80:/ { print $1 }' | sort -u | tr '\n' ' '
+}
+
+# Prefixes that the node announces as a gateway: of all sites, else the single one
+get_own_prefixes() {
+	local prefixes
+
+	prefixes="$(sed -n 's#^\([0-9a-fA-F:]*/[0-9]*\),.*#\1#p' "$PARKER_RA_STATE" 2>/dev/null)"
+	[ -n "$prefixes" ] || prefixes="$(sed -n 's#^[[:space:]]*\([0-9a-fA-F:]*/[0-9]*\).*#\1#p' "$PARKER_RANGE6" 2>/dev/null)"
+	echo "$prefixes" | grep . | sort -u | tr '\n' ' '
+}
+
+# Router lifetime of the router advertisement daemon of the gateway. Empty if
+# no daemon runs. uradvd sends router lifetime 0 when the option is not set.
+get_router_lifetime() {
+	local pid args
+
+	for pid in $(pidof uradvd); do
+		args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+		# Not the router advertisements of ragoodbye or of this script
+		case "$args" in
+			*"--preferred-lifetime 0 "*) continue ;;
+		esac
+		echo "$args" | awk '{
+			for (i = 1; i < NF; i++)
+				if ($i == "--default-lifetime") { print $(i + 1); exit }
+			print 0
+		}'
+		return 0
+	done
+}
+
+get_own_lladdr() {
+	ip -6 addr show dev br-client scope link 2>/dev/null |
+		awk '$1 == "inet6" { sub(/\/.*/, "", $2); print $2; exit }'
+}
+
+own_ra_rule() {
+	local lladdr
+
+	lladdr="$(get_own_lladdr)"
+	[ -n "$lladdr" ] || return 1
+	echo "INPUT -i br-client -s $lladdr -p ipv6-icmp --icmpv6-type router-advertisement -j DROP"
+}
+
+# Stop uradvd and remove the ip6tables rule of deprecate_old_prefixes
+cleanup_deprecate() {
+	local rule
+
+	# shellcheck disable=SC2046
+	kill $(cat "$DEPRECATE_FILE" 2>/dev/null) 2>/dev/null
+	rm -f "$DEPRECATE_FILE"
+	rule="$(own_ra_rule)" || return 0
+	# shellcheck disable=SC2086
+	ipt -C $rule 2>/dev/null && ipt -D $rule
+	return 0
+}
+
+stop_deprecate() {
+	local pid
+
+	# The job can be gone, and its PID can belong to another process now
+	pid="$(cat "$DEPRECATE_FILE.job" 2>/dev/null)"
+	[ -n "$pid" ] && grep -q -F "$0" "/proc/$pid/cmdline" 2>/dev/null && kill "$pid"
+	rm -f "$DEPRECATE_FILE.job"
+	cleanup_deprecate
+}
+
+# Tell the clients that the prefixes of the old router are deprecated. They
+# then use an address of the new router for new connections, and the old
+# router does not get their traffic. Wait for a new prefix first: if the new
+# router announces the same prefix, the node must not deprecate it. In client
+# mode, do not wait longer than DEPRECATE_GRACE after the first router
+# advertisement of the new router: the clients have the new router then, but
+# odhcp6c on the node can need more time (a failed solicitation).
+#
+# $1: old prefixes. $2: the selected gateway (empty on a gateway); the job
+# stops when it changes. $3: client or server. $4: old routers (LLADDR,MAC).
+# $5: the router advertisement counter at the gateway change (client).
+#
+# The clients still have a default route through each old router, and the
+# router advertisements of the node cannot remove it. When an old router is
+# alive, it drops the packets with a source address of the new prefix. Thus
+# the node also sends router lifetime 0 in the name of each old router, from
+# its link-local and MAC address. These go only out of the local client
+# ports, never into the mesh: the clients of other nodes can still use the
+# old router.
+#
+# client: when the node knows no old router, it sends router advertisements
+# from its own link-local address with router lifetime 0 and preferred
+# lifetime 0 for each old prefix. Also these go only out of the local client
+# ports.
+#
+# server: the node became a gateway. Its clients can still have the prefix of
+# the gateway that the node used before. The router advertisements come from
+# the router address of the node, so they use the router lifetime of its
+# router advertisement daemon. The mesh nodes that selected this node pass
+# them on. Thus use valid lifetime 0: nodes and clients that do not know the
+# old prefix ignore it (RFC 4862, 5.5.3 d), and the others only deprecate it.
+deprecate_old_prefixes() {
+	local old="$1" new="" stale="" args="" pargs="" prefix rule waited=0 pids="" ports router
+	local lifetime=0 valid="$DEPRECATE_VALID" grace=""
+
+	ports="$(get_client_ports)"
+	[ "$3" = server ] || [ -n "$ports" ] || return 0
+	while [ "$waited" -lt "$DEPRECATE_WAIT" ]; do
+		if [ "$3" = server ]; then
+			lifetime="$(get_router_lifetime)"
+			new="$(get_own_prefixes)"
+			[ -n "$lifetime" ] && [ -n "$new" ] && break
+		else
+			new="$(get_prefixes)"
+			for prefix in $new; do
+				contains "$old" "$prefix" || break 2
+			done
+			if [ -z "$grace" ] && [ -n "$5" ] && [ "$(get_ra_count)" -gt "$5" ]; then
+				grace=$((waited + DEPRECATE_GRACE))
+			fi
+			[ -n "$grace" ] && [ "$waited" -ge "$grace" ] && break
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	[ "$3" = server ] && { [ -n "$lifetime" ] && [ -n "$new" ] || return 0; valid=0; }
+	for prefix in $old; do
+		contains "$new" "$prefix" && continue
+		stale="$stale $prefix"
+		args="$args -a $prefix"
+		pargs="$pargs -p $prefix"
+	done
+	[ -n "$stale" ] || return 0
+	[ "$(cat "$STATE_FILE" 2>/dev/null)" = "$2" ] || return 0
+
+	log "Deprecating the prefixes of the old router on the clients:$stale"
+	if [ "$3" = server ]; then
+		# The node receives its own router advertisements (multicast loop). Do not
+		# let odhcp6c add the old prefixes again.
+		# shellcheck disable=SC2086
+		if rule="$(own_ra_rule)" && ! ipt -C $rule 2>/dev/null; then
+			ipt -I $rule
+		fi
+		# shellcheck disable=SC2086
+		"$URADVD" -i br-client --default-lifetime "$lifetime" --preferred-lifetime 0 \
+			--valid-lifetime "$valid" \
+			--min-router-adv-interval 3 --max-router-adv-interval 4 $args >/dev/null 2>&1 &
+		pids="$!"
+	elif [ -z "$4" ]; then
+		# Not through br-client: it contains the mesh (bat0)
+		# shellcheck disable=SC2086
+		"$RA_GOODBYE" -s "$(get_own_lladdr)" -m "$(cat "$BR_ADDRESS")" -v "$valid" -n 3 -t 3 \
+			$pargs $ports >/dev/null 2>&1 &
+		pids="$!"
+	fi
+	if [ -n "$4" ] && [ -n "$ports" ] && [ -x "$RA_GOODBYE" ]; then
+		for router in $4; do
+			log "Removing the old router ${router%,*} (${router#*,}) on the local clients: $ports"
+			# shellcheck disable=SC2086
+			"$RA_GOODBYE" -s "${router%,*}" -m "${router#*,}" -n 3 -t 3 \
+				$pargs $ports >/dev/null 2>&1 &
+			pids="$pids $!"
+		done
+	fi
+	echo "$pids" > "$DEPRECATE_FILE"
+	sleep "$DEPRECATE_DURATION"
+	cleanup_deprecate
+}
+
+start_deprecate() {
+	(trap - EXIT; deprecate_old_prefixes "$@") >/dev/null 2>&1 &
+	echo "$!" > "$DEPRECATE_FILE.job"
+}
+
+mesh_ready=0
+[ "${1:-}" = mesh-ready ] && mesh_ready=1
 
 lock "$LOCK_FILE"
 trap 'lock -u "$LOCK_FILE"' EXIT
@@ -177,11 +480,38 @@ if batctl gw_mode 2>/dev/null | grep -qw '^server'; then
 		ebtables-tiny -A "$CHAIN" -j RETURN
 	fi
 	rm -f "$STATE_FILE"
+	old_prefixes="$(cat "$PREFIX_FILE" 2>/dev/null)"
+	if [ -n "$old_prefixes" ]; then
+		# The node was a gateway client before
+		stop_deprecate
+		routers="$(cat "$ROUTER_FILE" 2>/dev/null)"
+		# The client phase was too short to learn the router
+		[ -n "$routers" ] || routers="$(last_routers)"
+		[ -x "$URADVD" ] && start_deprecate "$old_prefixes" "" server "$routers"
+	fi
+	rm -f "$PREFIX_FILE" "$ROUTER_FILE"
 	exit 0
+fi
+
+# Save the prefixes and routers of the gateway client phase. When the uplink
+# of the node comes back, ffbs-mesh-vpn-parker sets client6 to static (the own
+# prefix) before batman-adv is in server mode. Do not save the own prefix
+# then: it would replace the prefixes of the old gateway.
+if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
+	prefixes="$(get_prefixes)"
+	[ -n "$prefixes" ] && echo "$prefixes" > "$PREFIX_FILE"
+	routers="$(get_default_routers | tr '\n' ' ')"
+	if [ -n "$routers" ]; then
+		echo "$routers" > "$ROUTER_FILE"
+		[ "$(cat "$LAST_FILE" 2>/dev/null)" = "$routers|$prefixes" ] || echo "$routers|$prefixes" > "$LAST_FILE"
+	fi
 fi
 
 gw="$(get_gateway)"
 if [ -z "$gw" ]; then
+	# batman-adv sends the uevent before it sets the server mode. Check again
+	# soon, so that the old prefixes are deprecated if the node is a gateway now.
+	[ -f "$STATE_FILE" ] && schedule_check 3
 	accept_all "No batman-adv gateway selected."
 	exit 1
 fi
@@ -194,6 +524,9 @@ for _ in 1 2 3 4 5; do
 done
 if [ -z "$want" ]; then
 	accept_all "Gateway $gw announces no client MAC address."
+	# The translation table of a new gateway can arrive later than the gw
+	# uevent. Do not wait for the next run of micron.
+	schedule_check 3
 	exit 2
 fi
 
@@ -216,10 +549,12 @@ fi
 # default route through it: during the fallback, odhcp6c knows all routers,
 # and netifd installs only one of their default routes, which can be the
 # route of another router. Then restart odhcp6c, so that it forgets the
-# other routers.
+# other routers. Do all of this only when odhcp6c is not starting
+# (CLIENT6_START), because each step restarts odhcp6c.
 use_fallback=0
 stop_fallback=0
 solicit=0
+ready_solicit=0
 if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 	sync_counter "$want"
 	count="$(get_ra_count)"
@@ -239,11 +574,22 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		rm -f "$MISSING_FILE" "$SOLICIT_FILE"
 	elif [ ! -f "$MISSING_FILE" ]; then
 		echo "$now" > "$MISSING_FILE"
+		rm -f "$SOLICIT_FILE"
 	fi
 	missing_since="$(cat "$MISSING_FILE" 2>/dev/null)"
+	starting="$(client6_starting)" || starting=""
+	# bat0 is new (network reload at the change to gateway client, or boot).
+	# Until now, bridge loop avoidance dropped the router and DHCPv6
+	# solicitations of odhcp6c, and odhcp6c sends the next ones only after a
+	# long time (exponential backoff). Restart it now, also while it starts.
+	if [ "$mesh_ready" = 1 ] && [ "$gw_changed" = 0 ] && ! renew_running &&
+		{ [ "$router_ok" = 0 ] || ! client6_up; }; then
+		ready_solicit=1
+		starting=""
+	fi
 
 	if [ -f "$FALLBACK_FILE" ]; then
-		if [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
+		if [ -z "$starting" ] && [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
 			rm -f "$FALLBACK_FILE" "$SOLICIT_FILE"
 			echo "$now" > "$MISSING_FILE"
 			missing_since="$now"
@@ -252,37 +598,46 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		else
 			use_fallback=1
 		fi
+	elif [ "$ready_solicit" = 1 ]; then
+		echo "0 $now" > "$SOLICIT_FILE"
+		solicit=1
 	elif [ "$gw_changed" = 0 ]; then
 		reason=""
 		[ -n "$missing_since" ] && [ $((now - missing_since)) -ge "$FALLBACK_DELAY" ] &&
 			reason="No IPv6 default route through gateway $gw."
 		[ $((now - last_seen)) -ge "$RA_TIMEOUT" ] &&
 			reason="No router advertisement from gateway $gw for $((now - last_seen)) seconds."
-		if [ -n "$reason" ]; then
+		if [ -n "$starting" ]; then
+			:
+		elif [ -n "$reason" ]; then
 			echo "$now" > "$FALLBACK_FILE"
 			use_fallback=1
 			log "$reason Accepting all router advertisements."
-		elif [ -n "$missing_since" ] && [ ! -f "$SOLICIT_FILE" ] &&
-			[ $((now - missing_since)) -ge "$SOLICIT_DELAY" ]; then
-			echo "$now" > "$SOLICIT_FILE"
+		elif [ -n "$missing_since" ] && ! renew_running &&
+			nsol="$(next_solicit "$missing_since")" && [ "$now" -ge "$nsol" ]; then
+			read -r n _ 2>/dev/null < "$SOLICIT_FILE" || n=0
+			echo "$((${n:-0} + 1)) $now" > "$SOLICIT_FILE"
 			solicit=1
 		fi
 	fi
 
 	if [ "$use_fallback" = 1 ]; then
 		# Check often whether the selected router is back
-		schedule_check 10
+		next=$((now + 10))
 	else
 		next=$((last_seen + RA_TIMEOUT))
 		[ -n "$missing_since" ] && [ $((missing_since + FALLBACK_DELAY)) -lt "$next" ] &&
 			next=$((missing_since + FALLBACK_DELAY))
-		[ -n "$missing_since" ] && [ ! -f "$SOLICIT_FILE" ] &&
-			[ $((missing_since + SOLICIT_DELAY)) -lt "$next" ] &&
-			next=$((missing_since + SOLICIT_DELAY))
-		delay=$((next - now + 1))
-		[ "$delay" -lt 1 ] && delay=1
-		schedule_check "$delay"
+		[ -n "$missing_since" ] && nsol="$(next_solicit "$missing_since")" &&
+			[ "$nsol" -lt "$next" ] && next="$nsol"
+		# Save the new router soon
+		[ "$solicit" = 1 ] && [ $((now + 2)) -lt "$next" ] && next=$((now + 2))
 	fi
+	# A step that is due while odhcp6c starts comes when this ends
+	[ -n "$starting" ] && [ "$next" -lt "$starting" ] && next="$starting"
+	delay=$((next - now + 1))
+	[ "$delay" -lt 1 ] && delay=1
+	schedule_check "$delay"
 fi
 
 rules="$(ebtables-tiny -L "$CHAIN" | grep -e '-j ' | sed 's/ *$//')"
@@ -320,13 +675,16 @@ fi
 
 if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
 	# Request router advertisements from all routers now
-	ifup client6
+	restart_client6
 elif [ "$stop_fallback" = 1 ]; then
 	log "Restarting IPv6 to forget the other routers."
-	ifup client6
+	restart_client6
+elif [ "$ready_solicit" = 1 ]; then
+	log "The mesh carries the broadcasts of the node again. Restarting IPv6."
+	restart_client6
 elif [ "$solicit" = 1 ]; then
 	log "No IPv6 default route through gateway $gw for $((now - missing_since)) seconds. Requesting router advertisements again."
-	ifup client6
+	restart_client6
 fi
 
 [ "$gw_changed" = 1 ] || exit 0
@@ -335,4 +693,38 @@ fi
 [ "$(uci -q get network.client.proto)" = dhcp ] || exit 0
 
 log "Gateway changed from ${old_gw:-none} to $gw. Renewing DHCPv4 and IPv6 configuration."
+stop_deprecate
+old_prefixes="$(get_prefixes)"
+old_routers=""
+for router in $(get_default_routers); do
+	contains "$want" "${router#*,}" || old_routers="$old_routers $router"
+done
+if [ -z "$old_routers" ]; then
+	# After a reboot or a network reload, the clients can still use the last
+	# router of the node
+	for router in $(last_routers); do
+		contains "$want" "${router#*,}" || old_routers="$old_routers $router"
+	done
+	[ -n "$old_routers" ] && old_prefixes="$old_prefixes $(last_prefixes)"
+fi
+# Save the new prefixes soon. The node needs them if it becomes a gateway.
+schedule_check 10
+if { [ -n "$old_gw" ] || [ -n "$old_routers" ]; } && [ -n "$old_prefixes" ] && [ -x "$RA_GOODBYE" ]; then
+	start_deprecate "$old_prefixes" "$gw" client "$old_routers" "${count:-}"
+fi
+
+# The renewal can take some seconds (ifup, firewall reload). Do not hold the
+# lock in this time: the timer and hotplug runs would wait for it and then
+# send their router solicitations back to back. They send none while the
+# renewal runs.
+echo "$$" > "$RENEW_FILE"
+trap 'rm -f "$RENEW_FILE"' EXIT
+lock -u "$LOCK_FILE"
 renew_client_config
+lock "$LOCK_FILE"
+trap 'rm -f "$RENEW_FILE"; lock -u "$LOCK_FILE"' EXIT
+# ifup client6 sent a router solicitation. Count the next ones from now.
+if [ -f "$MISSING_FILE" ] && [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$gw" ]; then
+	echo "0 $(uptime_s)" > "$SOLICIT_FILE"
+	schedule_check $((SOLICIT_FIRST + 1))
+fi

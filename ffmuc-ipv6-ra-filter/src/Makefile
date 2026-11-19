@@ -1,4 +1,4 @@
-all: respondd.so
+all: respondd.so ra-goodbye
 
 CPPFLAGS += -D_GNU_SOURCE
 
@@ -44,3 +44,6 @@ LDLIBS += $(LIBBATADV_LDLIBS)
 
 respondd.so: respondd.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -shared -fPIC -o $@ $^ $(LDLIBS) -lgluonutil
+
+ra-goodbye: ra-goodbye.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
