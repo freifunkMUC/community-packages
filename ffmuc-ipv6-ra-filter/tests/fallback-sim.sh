@@ -27,7 +27,8 @@ setup() {
 	export SIM
 	mkdir "$SIM/bin"
 	: > "$SIM/ebt"; : > "$SIM/ipt"; : > "$SIM/known"; : > "$SIM/alive"; : > "$SIM/log"
-	: > "$SIM/drop"; : > "$SIM/uradvd"
+	: > "$SIM/drop"; : > "$SIM/uradvd"; : > "$SIM/goodbye"
+	mkdir -p "$SIM/brif/bat0" "$SIM/brif/local-port" "$SIM/brif/client0" "$SIM/brif/eth0.1"
 	printf '%s 2001:db8:1::/64\n%s 2001:db8:2::/64\n' "$R1" "$R2" > "$SIM/prefix"
 	echo 0 > "$SIM/ra_count"
 	echo "0.00 0.00" > "$SIM/uptime"
@@ -35,6 +36,8 @@ setup() {
 		"$R1" "$O1" "$R2" "$O2" > "$SIM/tg"
 	sed -e "s#/proc/uptime#$SIM/uptime#" -e "s#/tmp/ffmuc#$SIM/ffmuc#g" -e "s#/var/lock/#$SIM/#" \
 		-e "s#/var/run/#$SIM/#" -e "s#/usr/sbin/uradvd#$SIM/bin/uradvd#" \
+		-e "s#/lib/gluon/ffmuc-ipv6-ra-filter/ra-goodbye#$SIM/bin/ra-goodbye#" \
+		-e "s#/sys/class/net/br-client/brif#$SIM/brif#" \
 		-e "s#/tmp/range6#$SIM/range6#" -e "s#/tmp/parker-sites/#$SIM/#" \
 		-e 's#< "/proc/$pid/cmdline"#< "$SIM/proc/$pid/cmdline"#' \
 		-e 's#(sleep "$1"; exec "$0") >/dev/null 2>&1 &#echo "$1" > "$SIM/timer"; return#' \
@@ -105,7 +108,7 @@ case "$*" in
 	awk -v m="$mac" '$1 == m { print $2 " proto static metric 256 pref medium" }' "$SIM/prefix"
 done ;;
 "-6 addr show dev br-client scope link") echo "    inet6 fe80::1/64 scope link" ;;
-"-6 neigh show dev br-client to "*) echo "$7 lladdr $(echo "$7" | sed 's/fe80:://; s/\(..\)/\1:/g; s/:$//') router REACHABLE" ;;
+"-6 neigh show dev br-client to "*) [ -f "$SIM/nolladdr" ] && { echo "$7 router FAILED"; exit; }; echo "$7 lladdr $(echo "$7" | sed 's/fe80:://; s/\(..\)/\1:/g; s/:$//') router REACHABLE" ;;
 esac
 EOF
 	cat > "$SIM/bin/ifup" <<'EOF'
@@ -126,6 +129,10 @@ EOF
 	cat > "$SIM/bin/pidof" <<'EOF'
 #!/bin/sh
 ls "$SIM/proc" 2>/dev/null
+EOF
+	cat > "$SIM/bin/ra-goodbye" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$SIM/goodbye"
 EOF
 	cat > "$SIM/bin/uradvd" <<'EOF'
 #!/bin/sh
@@ -283,6 +290,8 @@ at 200; run; wait_job
 check "uradvd deprecates only the old prefix, with the router lifetime of the daemon" \
 	'grep -q -e "^-i br-client --default-lifetime 180 --preferred-lifetime 0 --valid-lifetime 0 .* -a 2001:db8:2::/64 |" "$SIM/uradvd" &&
 	! grep -q "2001:db8:1::" "$SIM/uradvd" && [ "$(wc -l < "$SIM/uradvd")" -eq 1 ]'
+check "router lifetime 0 in the name of the router of O2, only on the client ports" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
 check "the filter does not filter router advertisements" 'grep -q -x -e "-j RETURN" "$SIM/ebt"'
 at 300; run; wait_job
 check "only one deprecation" '[ "$(wc -l < "$SIM/uradvd")" -eq 1 ]'
@@ -323,6 +332,47 @@ printf '2001:db8:1::/64\n' > "$SIM/range6"
 daemon "uradvd -i br-client --default-lifetime 180 -a 2001:db8:1::/64"
 at 203; run; wait_job
 check "uradvd deprecates the old prefix" 'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd"'
+
+echo "11. The gateway changes while the old gateway is alive. The clients have a"
+echo "    default route through the old router, and it drops the new source"
+echo "    addresses. The node removes the old router on its local clients."
+setup
+up "$R1"; up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; wait_job
+check "no router lifetime 0 at the first gateway" '[ ! -s "$SIM/goodbye" ]'
+echo "$O1" > "$SIM/gw"
+at 200; run; wait_job
+check "router lifetime 0 from the link-local and MAC address of the old router" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
+check "not into the mesh (bat0) and not to the node (local-port)" \
+	'! grep -q -e bat0 -e local-port "$SIM/goodbye"'
+check "not in the name of the new router" '! grep -q "$R1" "$SIM/goodbye"'
+check "uradvd deprecates the old prefix as before" 'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd"'
+final_state
+
+echo "12. The MAC address of the old router is not known. The node does not send"
+echo "    router lifetime 0 in its name."
+setup
+up "$R1"; up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run
+: > "$SIM/nolladdr"
+echo "$O1" > "$SIM/gw"
+at 200; run; wait_job
+check "no router lifetime 0" '[ ! -s "$SIM/goodbye" ]'
+check "uradvd deprecates the old prefix" 'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd"'
+
+echo "13. The node has no local client port. It sends nothing in the name of the"
+echo "    old router."
+setup
+rm -r "$SIM/brif/client0" "$SIM/brif/eth0.1"
+up "$R1"; up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run
+echo "$O1" > "$SIM/gw"
+at 200; run; wait_job
+check "no router lifetime 0" '[ ! -s "$SIM/goodbye" ]'
 
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi
