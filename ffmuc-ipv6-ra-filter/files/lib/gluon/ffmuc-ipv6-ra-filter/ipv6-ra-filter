@@ -13,10 +13,15 @@ MISSING_FILE=/tmp/ffmuc-ipv6-ra-filter.missing
 FALLBACK_FILE=/tmp/ffmuc-ipv6-ra-filter.fallback
 RA_FILE=/tmp/ffmuc-ipv6-ra-filter.ra
 TIMER_FILE=/tmp/ffmuc-ipv6-ra-filter.timer
+SOLICIT_FILE=/tmp/ffmuc-ipv6-ra-filter.solicit
 COUNT_CHAIN=ffmuc_ra_count
 # Time in seconds that the node can be without a default route through the
 # selected router before the filter accepts all routers
 FALLBACK_DELAY=30
+# Time in seconds without a default route through the selected router before
+# the node sends a new router solicitation. The router solicitation at a
+# gateway change can come before the router of the new gateway is ready.
+SOLICIT_DELAY=10
 # Maximum router advertisement interval of the gateways. When no router
 # advertisement of the selected router arrives for 3 intervals, the filter
 # accepts all routers.
@@ -125,7 +130,7 @@ accept_all() {
 		drop_all
 		ebtables-tiny -A "$CHAIN" -j ACCEPT
 	fi
-	rm -f "$STATE_FILE" "$MISSING_FILE" "$FALLBACK_FILE" "$RA_FILE"
+	rm -f "$STATE_FILE" "$MISSING_FILE" "$FALLBACK_FILE" "$RA_FILE" "$SOLICIT_FILE"
 }
 
 renew_client_config() {
@@ -198,7 +203,7 @@ gw_changed=0
 if [ "$old_gw" != "$gw" ]; then
 	gw_changed=1
 	echo "$gw" > "$STATE_FILE"
-	rm -f "$FALLBACK_FILE"
+	rm -f "$FALLBACK_FILE" "$SOLICIT_FILE"
 	echo "$now" > "$MISSING_FILE"
 fi
 
@@ -207,9 +212,14 @@ fi
 # FALLBACK_DELAY seconds, or when it receives no router advertisement from it
 # for RA_TIMEOUT seconds. Then the node and the clients do not stay without
 # IPv6 while another router announces a prefix. Stop the fallback when a new
-# router advertisement of the selected router arrives and the node has a
-# default route through it.
+# router advertisement of the selected router arrives. Do not wait for a
+# default route through it: during the fallback, odhcp6c knows all routers,
+# and netifd installs only one of their default routes, which can be the
+# route of another router. Then restart odhcp6c, so that it forgets the
+# other routers.
 use_fallback=0
+stop_fallback=0
+solicit=0
 if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 	sync_counter "$want"
 	count="$(get_ra_count)"
@@ -226,15 +236,18 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		contains "$want" "$mac" && router_ok=1
 	done
 	if [ "$router_ok" = 1 ]; then
-		rm -f "$MISSING_FILE"
+		rm -f "$MISSING_FILE" "$SOLICIT_FILE"
 	elif [ ! -f "$MISSING_FILE" ]; then
 		echo "$now" > "$MISSING_FILE"
 	fi
 	missing_since="$(cat "$MISSING_FILE" 2>/dev/null)"
 
 	if [ -f "$FALLBACK_FILE" ]; then
-		if [ "$router_ok" = 1 ] && [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
-			rm -f "$FALLBACK_FILE"
+		if [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
+			rm -f "$FALLBACK_FILE" "$SOLICIT_FILE"
+			echo "$now" > "$MISSING_FILE"
+			missing_since="$now"
+			stop_fallback=1
 			log "Router of gateway $gw is back. Stopping the fallback."
 		else
 			use_fallback=1
@@ -249,6 +262,10 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 			echo "$now" > "$FALLBACK_FILE"
 			use_fallback=1
 			log "$reason Accepting all router advertisements."
+		elif [ -n "$missing_since" ] && [ ! -f "$SOLICIT_FILE" ] &&
+			[ $((now - missing_since)) -ge "$SOLICIT_DELAY" ]; then
+			echo "$now" > "$SOLICIT_FILE"
+			solicit=1
 		fi
 	fi
 
@@ -259,6 +276,9 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		next=$((last_seen + RA_TIMEOUT))
 		[ -n "$missing_since" ] && [ $((missing_since + FALLBACK_DELAY)) -lt "$next" ] &&
 			next=$((missing_since + FALLBACK_DELAY))
+		[ -n "$missing_since" ] && [ ! -f "$SOLICIT_FILE" ] &&
+			[ $((missing_since + SOLICIT_DELAY)) -lt "$next" ] &&
+			next=$((missing_since + SOLICIT_DELAY))
 		delay=$((next - now + 1))
 		[ "$delay" -lt 1 ] && delay=1
 		schedule_check "$delay"
@@ -300,6 +320,12 @@ fi
 
 if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
 	# Request router advertisements from all routers now
+	ifup client6
+elif [ "$stop_fallback" = 1 ]; then
+	log "Restarting IPv6 to forget the other routers."
+	ifup client6
+elif [ "$solicit" = 1 ]; then
+	log "No IPv6 default route through gateway $gw for $((now - missing_since)) seconds. Requesting router advertisements again."
 	ifup client6
 fi
 
