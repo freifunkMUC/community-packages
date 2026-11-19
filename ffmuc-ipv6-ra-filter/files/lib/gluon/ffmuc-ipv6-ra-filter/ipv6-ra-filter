@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# Usage: ipv6-ra-filter [mesh-ready]
+# mesh-ready: bat0 is new and the mesh carries the broadcasts and multicasts of
+# the node again (ffbs-mesh-vpn-parker, parker-bcast).
+#
 # Accept router advertisements only from the batman-adv gateway that is selected
 # for IPv4. The gateway sends its router advertisements from its client MAC
 # address, not from its originator address. Thus accept the MAC addresses that
@@ -159,16 +163,22 @@ restart_client6() {
 	ifup client6
 }
 
+client6_up() {
+	case "$(ubus -S call network.interface.client6 status 2>/dev/null)" in
+		*'"up":true'*) return 0 ;;
+	esac
+	return 1
+}
+
 # odhcp6c was restarted less than CLIENT6_START seconds ago, and client6 is not
-# up yet. Prints the time when this ends.
+# up yet. Prints the time when this ends. ffbs-mesh-vpn-parker also writes
+# CLIENT6_FILE when its network reload restarts client6.
 client6_starting() {
 	local t
 
 	t="$(cat "$CLIENT6_FILE" 2>/dev/null)"
 	[ -n "$t" ] && [ "$(uptime_s)" -lt $((t + CLIENT6_START)) ] || return 1
-	case "$(ubus -S call network.interface.client6 status 2>/dev/null)" in
-		*'"up":true'*) return 1 ;;
-	esac
+	client6_up && return 1
 	echo $((t + CLIENT6_START))
 }
 
@@ -445,6 +455,9 @@ start_deprecate() {
 	echo "$!" > "$DEPRECATE_FILE.job"
 }
 
+mesh_ready=0
+[ "${1:-}" = mesh-ready ] && mesh_ready=1
+
 lock "$LOCK_FILE"
 trap 'lock -u "$LOCK_FILE"' EXIT
 
@@ -541,6 +554,7 @@ fi
 use_fallback=0
 stop_fallback=0
 solicit=0
+ready_solicit=0
 if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 	sync_counter "$want"
 	count="$(get_ra_count)"
@@ -564,6 +578,15 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 	fi
 	missing_since="$(cat "$MISSING_FILE" 2>/dev/null)"
 	starting="$(client6_starting)" || starting=""
+	# bat0 is new (network reload at the change to gateway client, or boot).
+	# Until now, bridge loop avoidance dropped the router and DHCPv6
+	# solicitations of odhcp6c, and odhcp6c sends the next ones only after a
+	# long time (exponential backoff). Restart it now, also while it starts.
+	if [ "$mesh_ready" = 1 ] && [ "$gw_changed" = 0 ] && ! renew_running &&
+		{ [ "$router_ok" = 0 ] || ! client6_up; }; then
+		ready_solicit=1
+		starting=""
+	fi
 
 	if [ -f "$FALLBACK_FILE" ]; then
 		if [ -z "$starting" ] && [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
@@ -575,6 +598,9 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		else
 			use_fallback=1
 		fi
+	elif [ "$ready_solicit" = 1 ]; then
+		echo "0 $now" > "$SOLICIT_FILE"
+		solicit=1
 	elif [ "$gw_changed" = 0 ]; then
 		reason=""
 		[ -n "$missing_since" ] && [ $((now - missing_since)) -ge "$FALLBACK_DELAY" ] &&
@@ -652,6 +678,9 @@ if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
 	restart_client6
 elif [ "$stop_fallback" = 1 ]; then
 	log "Restarting IPv6 to forget the other routers."
+	restart_client6
+elif [ "$ready_solicit" = 1 ]; then
+	log "The mesh carries the broadcasts of the node again. Restarting IPv6."
 	restart_client6
 elif [ "$solicit" = 1 ]; then
 	log "No IPv6 default route through gateway $gw for $((now - missing_since)) seconds. Requesting router advertisements again."

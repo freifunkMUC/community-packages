@@ -4,7 +4,8 @@
 # batman-adv has started (bat0 is new, at boot and at each gw_mode change):
 # send a burst of broadcasts, so that the other nodes accept the broadcasts
 # of this node at once. See
-# /usr/share/lua/parker/bcast.lua.
+# /usr/share/lua/parker/bcast.lua. Then tell ffmuc-ipv6-ra-filter that the
+# mesh carries the broadcasts of the node again.
 
 [ "$ACTION" = add ] && [ "$INTERFACE" = bat0 ] || exit 0
 
@@ -17,4 +18,8 @@
 			print("sent " .. sent .. " broadcasts (probe still dropped after " .. probed .. " s, sent anyway)")
 		end')
 	logger -t parker-bcast "bat0 is new: $msg"
+	# The router and DHCPv6 solicitations of the node since bat0 started
+	# were lost. Request them again now.
+	[ -x /lib/gluon/ffmuc-ipv6-ra-filter/ipv6-ra-filter ] &&
+		/lib/gluon/ffmuc-ipv6-ra-filter/ipv6-ra-filter mesh-ready
 ) </dev/null >/dev/null 2>&1 &

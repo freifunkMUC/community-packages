@@ -109,7 +109,7 @@ EOF
 #!/bin/sh
 # odhcp6c start time: netifd sets client6 up and the default route only
 # after SIM/ready
-client6_ready() { [ ! -f "$SIM/ready" ] || [ "$(cut -d. -f1 "$SIM/uptime")" -ge "$(cat "$SIM/ready")" ]; }
+client6_ready() { [ ! -f "$SIM/stuck" ] && { [ ! -f "$SIM/ready" ] || [ "$(cut -d. -f1 "$SIM/uptime")" -ge "$(cat "$SIM/ready")" ]; }; }
 case "$*" in
 "-6 route show default dev br-client") [ -s "$SIM/known" ] && client6_ready &&
 	echo "default via fe80::$(tail -n 1 "$SIM/known" | tr -d :) dev br-client proto static metric 512" ;;
@@ -132,6 +132,11 @@ fi
 [ "$1" = client6 ] || exit 0
 # odhcp6c needs SIM/start seconds before client6 is up
 [ -f "$SIM/start" ] && echo $(($(cut -d. -f1 "$SIM/uptime") + $(cat "$SIM/start"))) > "$SIM/ready"
+# bat0 is new: bridge loop avoidance drops the solicitations of odhcp6c. Its
+# next ones come only after a long time (backoff), so client6 does not come up
+# until the next restart.
+rm -f "$SIM/stuck"
+if [ -f "$SIM/bla" ]; then : > "$SIM/stuck"; exit 0; fi
 # odhcp6c restarts: it forgets all routers and sends a router solicitation
 : > "$SIM/known"
 # The solicitation fails (firewall reload): once, or as many times as the
@@ -155,8 +160,8 @@ grep -v -x -F "$1" "$SIM/known" > "$SIM/known.n"; echo "$1" >> "$SIM/known.n"; m
 EOF
 	cat > "$SIM/bin/ubus" <<'EOF'
 #!/bin/sh
-# client6 is up when odhcp6c started and knows a router
-if [ -f "$SIM/ready" ] && { [ "$(cut -d. -f1 "$SIM/uptime")" -lt "$(cat "$SIM/ready")" ] || [ ! -s "$SIM/known" ]; }; then
+# client6 is up when odhcp6c started, is not stuck and knows a router
+if [ -f "$SIM/stuck" ] || { [ -f "$SIM/ready" ] && { [ "$(cut -d. -f1 "$SIM/uptime")" -lt "$(cat "$SIM/ready")" ] || [ ! -s "$SIM/known" ]; }; }; then
 	echo '{"up":false,"pending":true}'
 else
 	echo '{"up":true,"pending":false}'
@@ -185,7 +190,7 @@ fast_sleep() { printf '#!/bin/sh\n[ "$1" = 8 ] && /bin/sleep 0.3\nexit 0\n' > "$
 slow_sleep() { printf '#!/bin/sh\n[ "$1" = 8 ] && /bin/sleep 0.3\n/bin/sleep 0.05\n' > "$SIM/bin/sleep"; }
 
 at() { echo "$1.00 0.00" > "$SIM/uptime"; }
-run() { PATH="$SIM/bin:$PATH" sh "$SIM/filter" >/dev/null 2>&1; }
+run() { PATH="$SIM/bin:$PATH" sh "$SIM/filter" "$@" >/dev/null 2>&1; }
 ra() { PATH="$SIM/bin:$PATH" "$SIM/bin/ra" "$1"; }
 up() { echo "$1" >> "$SIM/alive"; }
 down() { grep -v -x -F "$1" "$SIM/alive" > "$SIM/alive.n"; mv "$SIM/alive.n" "$SIM/alive"; }
@@ -595,6 +600,55 @@ at 245; ra "$R1"; ra "$R2"
 at 252; run
 final_state
 check "4 restarts of odhcp6c in total" '[ "$(ifups)" = 4 ]'
+
+echo "22. The uplink becomes a gateway client: the network reload creates bat0"
+echo "    again, and for 30 s the mesh drops its broadcasts and multicasts. The"
+echo "    router solicitation of the renewal is lost. When the mesh carries them"
+echo "    again (parker-bcast), the filter restarts odhcp6c at once."
+setup
+up "$R1"
+echo 11 > "$SIM/start"
+: > "$SIM/bla"
+echo "$O1" > "$SIM/gw"
+at 200; run                   # gateway change "from none": renewal, lost
+at 205; ra "$R1"              # periodic router advertisement: no DHCPv6 yet
+at 210; run
+check "no restart of odhcp6c while it starts" '[ "$(ifups)" = 1 ]'
+at 212; rm "$SIM/bla"; run mesh-ready
+check "restart of odhcp6c when the mesh is ready, also while it starts" \
+	'grep -q "^212 ifup client6" "$SIM/log" && [ "$(ifups)" = 2 ]'
+at 215; run
+check "no restart of odhcp6c after that while it starts" '[ "$(ifups)" = 2 ]'
+at 223; run
+check "default route 11 s after the mesh is ready" 'routes | grep -q "fe80::$(echo "$R1" | tr -d :) "'
+final_state
+check "2 restarts of odhcp6c in total" '[ "$(ifups)" = 2 ]'
+at 230; run mesh-ready
+check "no restart when the mesh is ready and client6 is up" '[ "$(ifups)" = 2 ]'
+setup
+up "$R1"
+echo 11 > "$SIM/start"
+: > "$SIM/slow"
+echo "$O1" > "$SIM/gw"
+at 200; run & g=$!
+/bin/sleep 0.5
+at 203; run mesh-ready
+check "no restart when the mesh is ready while the renewal runs" '! grep -q "ifup client6" "$SIM/log"'
+: > "$SIM/release"; wait $g
+check "the renewal restarts odhcp6c" '[ "$(ifups)" = 1 ]'
+setup
+up "$R2"
+echo 11 > "$SIM/start"
+echo "$O1" > "$SIM/gw"
+at 200; run; at 215; run      # renewal, then one router solicitation
+at 230; run                   # fallback: accept all routers
+check "fallback after FALLBACK_DELAY" 'in_fallback && [ "$(ifups)" = 3 ]'
+at 233; up "$R1"; ra "$R1"    # the router of the selected gateway is back
+at 234; run mesh-ready
+check "the fallback stops at once when the mesh is ready, with one restart" \
+	'! in_fallback && [ "$(ifups)" = 4 ]'
+at 245; ra "$R1"; run
+final_state
 
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi
