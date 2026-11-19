@@ -126,6 +126,12 @@ The upgrade script `251-parker-cellular-ip4table` sets `ip4table 1` on
 `cellular`. The proto handler copies it to `cellular_4`. Nodes without
 `cellular` do not change.
 
+A cellular node has no `br-wan`. The WAN device is the device of the
+default route in table 1 (IPv6 first), for example `wwan0`.
+`nodeconfig.sh` sends the IPv6 MTU of this device as `v6mtu`. When it
+cannot read the MTU, it sends 1280. `nodeconfig.lua` and `status` use the
+same device.
+
 Client addresses
 ----------------
 
@@ -145,14 +151,14 @@ so how big their packets may be is decided by what is left of the WAN
 MTU once WireGuard, and with 464XLAT the CLAT as well, have taken their
 share.
 
-`nodeconfig.sh` reports the MTU `br-wan` uses for IPv6 to the config
+`nodeconfig.sh` reports the MTU the WAN device uses for IPv6 to the config
 service, which answers with an upper bound in `mtu`. The service cannot
 know whether a tunnel ends up running over IPv6 or over IPv4, which
 differ by the 20 bytes between the two IP headers, so `nodeconfig.lua`
 finishes the calculation once it has resolved an endpoint, and
 `noderoute.lua` passes the result on to the clients:
 
-    A         the MTU br-wan uses for IPv6, 1436 behind DS-Lite
+    A         the MTU the WAN device uses for IPv6, 1436 behind DS-Lite
     wg MTU  = min(conf.mtu, A - 80)   for an endpoint reached over IPv6
             = min(conf.mtu, A - 60)   for one reached over IPv4
     RA MTU  = the smallest wg MTU of the tunnels with a live handshake
@@ -251,7 +257,7 @@ Config service
 `nodeconfig.sh` gets the node configuration from the config service:
 
     GET http://<config_server>/config?pubkey=<wg pubkey>&nonce=<nonce>
-        &v6mtu=<br-wan IPv6 MTU>&version=<gluon release>
+        &v6mtu=<WAN IPv6 MTU>&version=<gluon release>
         [&preferred_site=<name>][&tc_ingress=<kbit/s>&tc_egress=<kbit/s>]
 
 The answer is a JSON object. The last line is the usign signature with

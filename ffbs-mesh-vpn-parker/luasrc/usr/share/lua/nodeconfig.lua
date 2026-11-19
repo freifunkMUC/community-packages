@@ -8,12 +8,6 @@ local tmpdir = arg[3]
 
 local PRIVKEY = "/etc/parker/wg-privkey"
 
--- The MTU the kernel uses for IPv6 on the WAN. That is the number the
--- config service sizes our tunnels from (see nodeconfig.sh), and with an
--- upstream that announces a smaller MTU in its router advertisements --
--- DS-Lite, most notably -- it is smaller than the link MTU of br-wan.
-local WAN_MTU_FILE = "/proc/sys/net/ipv6/conf/br-wan/mtu"
-
 -- What Wireguard puts in front of every packet it sends: 16 bytes of its
 -- own header, a 16 byte authentication tag, the UDP header and the IP
 -- header of the family the endpoint lives in.
@@ -38,9 +32,13 @@ end
 
 local function wan_mtu()
 	-- The MTU our packets have to fit into on their way out, or nil while
-	-- the WAN is not up yet.
+	-- the WAN is not up yet. This is the MTU the kernel uses for IPv6 on the
+	-- WAN device, the number the config service sizes our tunnels from (see
+	-- nodeconfig.sh). With an upstream that announces a smaller MTU in its
+	-- router advertisements -- DS-Lite, most notably -- it is smaller than
+	-- the link MTU.
 
-	return tonumber(util.read_file(WAN_MTU_FILE) or "")
+	return util.wan_mtu()
 end
 
 local function tunnel_mtu(conf, endpoint)
