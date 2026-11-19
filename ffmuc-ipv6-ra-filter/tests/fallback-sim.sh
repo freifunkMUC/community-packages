@@ -2,8 +2,8 @@
 # shellcheck disable=SC2016,SC2034,SC2317,SC2329
 #
 # Simulation of the fallback of ipv6-ra-filter. It does not need a Gluon node:
-# small mock commands replace batctl, ebtables-tiny, ip6tables, ip, uci and
-# ifup. A model of odhcp6c and netifd keeps the routers that the node knows:
+# small mock commands replace batctl, ebtables-tiny, ip6tables, ip, uci, ubus
+# and ifup. A model of odhcp6c and netifd keeps the routers that the node knows:
 # netifd installs only one IPv6 default route, the route of the router with
 # the latest router advertisement (the route key of netifd has no gateway).
 #
@@ -107,8 +107,11 @@ esac
 EOF
 	cat > "$SIM/bin/ip" <<'EOF'
 #!/bin/sh
+# odhcp6c start time: netifd sets client6 up and the default route only
+# after SIM/ready
+client6_ready() { [ ! -f "$SIM/ready" ] || [ "$(cut -d. -f1 "$SIM/uptime")" -ge "$(cat "$SIM/ready")" ]; }
 case "$*" in
-"-6 route show default dev br-client") [ -s "$SIM/known" ] &&
+"-6 route show default dev br-client") [ -s "$SIM/known" ] && client6_ready &&
 	echo "default via fe80::$(tail -n 1 "$SIM/known" | tr -d :) dev br-client proto static metric 512" ;;
 "-6 route show dev br-client") for mac in $(cat "$SIM/known"); do
 	awk -v m="$mac" '$1 == m { print $2 " proto static metric 256 pref medium" }' "$SIM/prefix"
@@ -127,6 +130,8 @@ if [ "$1" = client ] && [ -f "$SIM/slow" ]; then
 	while [ ! -f "$SIM/release" ]; do /bin/sleep 0.05; done
 fi
 [ "$1" = client6 ] || exit 0
+# odhcp6c needs SIM/start seconds before client6 is up
+[ -f "$SIM/start" ] && echo $(($(cut -d. -f1 "$SIM/uptime") + $(cat "$SIM/start"))) > "$SIM/ready"
 # odhcp6c restarts: it forgets all routers and sends a router solicitation
 : > "$SIM/known"
 # The solicitation fails (firewall reload): once, or as many times as the
@@ -147,6 +152,15 @@ grep -q -x -F "$1" "$SIM/ipt" && echo $(($(cat "$SIM/ra_count") + 1)) > "$SIM/ra
 # node learns no route and no prefix
 [ -f "$SIM/dead" ] && exit 0
 grep -v -x -F "$1" "$SIM/known" > "$SIM/known.n"; echo "$1" >> "$SIM/known.n"; mv "$SIM/known.n" "$SIM/known"
+EOF
+	cat > "$SIM/bin/ubus" <<'EOF'
+#!/bin/sh
+# client6 is up when odhcp6c started and knows a router
+if [ -f "$SIM/ready" ] && { [ "$(cut -d. -f1 "$SIM/uptime")" -lt "$(cat "$SIM/ready")" ] || [ ! -s "$SIM/known" ]; }; then
+	echo '{"up":false,"pending":true}'
+else
+	echo '{"up":true,"pending":false}'
+fi
 EOF
 	cat > "$SIM/bin/pidof" <<'EOF'
 #!/bin/sh
@@ -535,6 +549,52 @@ check "next router solicitation 3 s after the renewal" 'grep -q "^214 ifup clien
 at 215; run
 check "no router solicitation 1 s after the last one" '! grep -q "^215 ifup client6" "$SIM/log"'
 final_state
+
+ifups() { grep -c "ifup client6" "$SIM/log"; }
+
+echo "21. odhcp6c needs 11 s after each restart before client6 is up. The"
+echo "    router of the new gateway starts late. The node does not restart"
+echo "    odhcp6c while it starts, and the fallback waits for the same time."
+setup
+up "$R2"
+echo 11 > "$SIM/start"
+echo "$O1" > "$SIM/gw"
+at 200; run                   # gateway change: renewal, odhcp6c starts
+at 204; run
+check "no router solicitation while odhcp6c starts" '[ "$(ifups)" = 1 ]'
+check "next check when the start time ends" '[ "$(cat "$SIM/timer")" = 12 ]'
+at 205; up "$R1"; at 206; ra "$R1"   # periodic router advertisement of R1
+at 207; run; at 210; run
+check "odhcp6c is not restarted before client6 is up" '[ "$(ifups)" = 1 ]'
+at 211
+check "default route through the new router 11 s after the restart" \
+	'routes | grep -q "fe80::$(echo "$R1" | tr -d :) "'
+at 212; run
+check "no restart when the route is there" '[ "$(ifups)" = 1 ]'
+final_state
+setup
+up "$R2"
+echo 11 > "$SIM/start"
+echo "$O1" > "$SIM/gw"
+at 200; run                   # R1 does not answer, client6 stays pending
+at 203; run; at 210; run
+check "no router solicitation before the start time ends" '[ "$(ifups)" = 1 ]'
+at 215; run
+check "router solicitation when the start time ends" 'grep -q "^215 ifup client6" "$SIM/log"'
+at 218; run; at 222; run; at 229; run
+check "no fallback while odhcp6c starts" '! in_fallback && [ "$(ifups)" = 2 ]'
+check "next check when the start time ends" '[ "$(cat "$SIM/timer")" = 2 ]'
+at 230; run
+check "fallback when the start time ends" 'in_fallback && grep -q "^230 ifup client6" "$SIM/log"'
+at 235; up "$R1"; ra "$R1"
+at 236; run
+check "the fallback stop waits until client6 is up" 'in_fallback && [ "$(ifups)" = 3 ]'
+at 241; run
+check "fallback stops when client6 is up" '! in_fallback && grep -q "^241 ifup client6" "$SIM/log"'
+at 245; ra "$R1"; ra "$R2"
+at 252; run
+final_state
+check "4 restarts of odhcp6c in total" '[ "$(ifups)" = 4 ]'
 
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi
