@@ -433,12 +433,18 @@ if batctl gw_mode 2>/dev/null | grep -qw '^server'; then
 	exit 0
 fi
 
-prefixes="$(get_prefixes)"
-[ -n "$prefixes" ] && echo "$prefixes" > "$PREFIX_FILE"
-routers="$(get_default_routers | tr '\n' ' ')"
-if [ -n "$routers" ]; then
-	echo "$routers" > "$ROUTER_FILE"
-	[ "$(cat "$LAST_FILE" 2>/dev/null)" = "$routers|$prefixes" ] || echo "$routers|$prefixes" > "$LAST_FILE"
+# Save the prefixes and routers of the gateway client phase. When the uplink
+# of the node comes back, ffbs-mesh-vpn-parker sets client6 to static (the own
+# prefix) before batman-adv is in server mode. Do not save the own prefix
+# then: it would replace the prefixes of the old gateway.
+if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
+	prefixes="$(get_prefixes)"
+	[ -n "$prefixes" ] && echo "$prefixes" > "$PREFIX_FILE"
+	routers="$(get_default_routers | tr '\n' ' ')"
+	if [ -n "$routers" ]; then
+		echo "$routers" > "$ROUTER_FILE"
+		[ "$(cat "$LAST_FILE" 2>/dev/null)" = "$routers|$prefixes" ] || echo "$routers|$prefixes" > "$LAST_FILE"
+	fi
 fi
 
 gw="$(get_gateway)"
