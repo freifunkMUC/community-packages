@@ -55,6 +55,7 @@ To prevent this, the node sends 70 small broadcasts directly on `bat0` (UDP to `
 It sends them when `bat0` has a neighbour, because batman-adv also counts broadcasts that no neighbour receives.
 When `bat0` starts, bridge loop avoidance drops all broadcasts for about 30 seconds.
 Thus the node first sends one test broadcast per second. It sends the 70 broadcasts when `tx_dropped` of `bat0` does not increase, or after 60 seconds.
+After the burst, the hotplug script runs `ipv6-ra-filter mesh-ready` (ffmuc-ipv6-ra-filter, if installed). The filter then restarts odhcp6c, because its solicitations since bat0 started were lost.
 The code is in `/etc/hotplug.d/net/50-parker-bcast-burst` and `/usr/share/lua/parker/bcast.lua`.
 `lua5.1 tests/bcast-sim.lua` (in the package directory) simulates the probe and the burst with mock modules.
 
