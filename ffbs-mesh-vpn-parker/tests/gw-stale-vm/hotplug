@@ -1,0 +1,2 @@
+#!/bin/sh
+[ "$BATTYPE" = gw ] && echo "UEVENT $(cat /proc/uptime | cut -d' ' -f1) $BATTYPE $BATACTION $BATDATA" > /dev/console

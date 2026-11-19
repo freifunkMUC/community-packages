@@ -92,6 +92,24 @@ The two lifetimes are equal, so that a client does not keep an address of an upl
 This lifetime only applies when the node stops without router lifetime 0, for example at a power loss.
 Android ignores router lifetimes below 180 seconds.
 
+Gateway after a power loss
+--------------------------
+
+batman-adv keeps a gateway selected until it purges the neighbour (200 seconds).
+Without OGMs, the metric to the gateway does not change.
+Thus after a power loss of the selected uplink, the mesh nodes have no IPv4 uplink for about 200 seconds.
+
+The firmware must add the batman-adv patch `tests/gw-stale-vm/2003-batman-adv-gw-skip-stale-gateways.patch`.
+With this patch, batman-adv skips a gateway when no OGM of it arrived for 10 originator intervals (10 seconds with the default of 1 second).
+Then it selects the best other gateway and sends a `gw` uevent.
+batman-adv keeps a stale gateway when no other gateway has OGMs.
+A gateway that comes back is selected again only by the normal rules (`gw_sel_class`). This prevents flapping.
+
+`ffmuc-ipv6-ra-filter` reacts to the `gw` uevent: it changes the router advertisement filter, requests a new DHCPv4 lease for the node, and restarts `client6`.
+The clients keep their lease from the dead uplink until they rebind (at most 105 seconds with leases of 2 minutes), because the dead uplink cannot send a DHCPNAK.
+
+`sh tests/gw-stale-vm/run.sh` builds the module without and with the patch and tests both in a QEMU VM (one mesh node, two gateways).
+
 Client addresses
 ----------------
 
