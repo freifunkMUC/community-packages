@@ -22,9 +22,11 @@ FALLBACK_DELAY=30
 # the node sends a new router solicitation. The router solicitation at a
 # gateway change can come before the router of the new gateway is ready.
 SOLICIT_DELAY=10
-# Time in seconds for the first new router solicitation. The first one after a
-# gateway change can fail, because the DHCPv4 renewal reloads the firewall.
+# Time in seconds for the first and the second new router solicitation. The
+# first ones after a gateway change can fail, because the DHCPv4 renewal and
+# the new DHCPv4 lease reload the firewall.
 SOLICIT_FIRST=3
+SOLICIT_SECOND=6
 # Maximum router advertisement interval of the gateways. When no router
 # advertisement of the selected router arrives for 3 intervals, the filter
 # accepts all routers.
@@ -129,7 +131,8 @@ last_prefixes() {
 solicit_delay() {
 	case "$(cat "$SOLICIT_FILE" 2>/dev/null)" in
 		'') echo "$SOLICIT_FIRST" ;;
-		1) echo "$SOLICIT_DELAY" ;;
+		1) echo "$SOLICIT_SECOND" ;;
+		2) echo "$SOLICIT_DELAY" ;;
 		*) return 1 ;;
 	esac
 }
