@@ -1,0 +1,6 @@
+config fallback 'fallback'
+	option enabled '1'
+	list server '5.1.66.255'
+	list server '185.150.99.255'
+	list server '2001:678:e68:f000::'
+	list server '2001:678:ed0:f000::'
