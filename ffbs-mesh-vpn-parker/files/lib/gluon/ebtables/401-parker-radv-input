@@ -1,0 +1,8 @@
+-- Drop the router advertisements to an active node itself, as 399-parker-radv-filterd
+-- does for its clients.
+--
+-- Do not send the router advertisements to the node itself through RADV_FILTER.
+-- gluon-radv-filterd listens on br-client. If INPUT drops the router advertisements
+-- of the other routers, the daemon cannot select a new router when the current
+-- router stops.
+rule('INPUT -p IPv6 -i bat0 --ip6-protocol ipv6-icmp --ip6-icmp-type router-advertisement -j PARKER_RADV')

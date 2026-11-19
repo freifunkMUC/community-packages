@@ -1,12 +1,21 @@
 # ffmuc-ipv6-ra-filter
 
-The package disables forwarding router advertisements on `bat0` which were sent from a different source than the connected gateway. This is based on the output of `batctl gwl` and sets the IPv6 gateway to the IPv4 gateway.
+The package accepts router advertisements from `bat0` only from the selected batman-adv gateway (`batctl gwl`). IPv4 and IPv6 then use the same gateway.
 
-It makes sure that clients only learn the IPv6 gateway of the gateway it is connected to and does not receive other router advertisements in the mesh.
+- The filter applies to the clients (`FORWARD`) and to the node itself (`INPUT`).
+- A Gluon gateway sends its router advertisements from its client MAC address, not from its originator address. The filter accepts the wired client MAC addresses that the gateway announces in the translation table (`batctl tg`).
+- When no gateway is selected, or the gateway announces no client MAC address, the filter accepts all router advertisements. The node then does not lose IPv6. The filter does not use router advertisements to select the router.
+- Fallback: the filter also accepts all other routers when the node has no IPv6 default route through the selected gateway for 30 seconds, or when no router advertisement of the selected gateway arrives for 300 seconds (3 times the maximum router advertisement interval of 100 seconds). An ip6tables counter (mangle table, chain `ffmuc_ra_count`) counts the router advertisements of the selected gateway. After 10 seconds without a default route through the selected gateway, the node sends a new router solicitation (`ifup client6`), because the router of a new gateway can start after the first router solicitation. The fallback stops when a new router advertisement of the selected gateway arrives. The filter does not wait for a default route through it: during the fallback, odhcp6c knows all routers, and netifd installs only one of their default routes. The filter then runs `ifup client6`, so that odhcp6c forgets the other routers. The node then does not stay without IPv6 while another router announces a prefix.
+- The filter is updated when batman-adv selects a new gateway (`gw` uevent), once per minute, and by a timer at the next fallback time (every 10 seconds during the fallback).
+- When the gateway changes on a node without a static client address, the node requests a new DHCPv4 lease and restarts `client6`. The node then drops the addresses and the default route of the old router at once.
+- A node in batman-adv gateway mode (`batctl gw_mode` reports `server`) selects no gateway. On such a node the chain returns to `FORWARD` and `INPUT`. The package that makes the node a gateway (for example `ffbs-mesh-vpn-parker`) then handles the router advertisements.
+- respondd reports the MAC address of the IPv6 default router of the node in `statistics.gateway6`. It reports nothing on a gateway node and when the node has no default router. Other packages also write `gateway6` (`ffbs-parker-respondd` reports the IPv6 address of its uplink), and respondd uses the value of the last module.
 
-A node which is a gateway itself (`batctl gw_mode` reports `server`) never selects a gateway and therefore has nothing to filter for. On such a node the filter does not apply and returns to the `FORWARD` chain, which leaves the router advertisements to whatever configures the node as gateway.
+Do not install `gluon-radv-filterd` together with this package. Its chain accepts the router advertisements first.
 
-The package also ships a `respondd` module which reports the MAC address the filter accepts router advertisements from as `statistics.gateway6`. It stays silent on a gateway node and whenever no gateway is known: `gateway6` is written by other packages as well (`ffbs-parker-respondd` reports the IPv6 address of its uplink there), and respondd lets the last module that writes a field win.
+### Tests
+
+`sh tests/fallback-sim.sh` simulates the fallback with mock commands. It does not need a Gluon node. Run it with busybox `sh`, for example in an Alpine container.
 
 ### Credits
 
