@@ -14,6 +14,8 @@ FALLBACK_FILE=/tmp/ffmuc-ipv6-ra-filter.fallback
 RA_FILE=/tmp/ffmuc-ipv6-ra-filter.ra
 TIMER_FILE=/tmp/ffmuc-ipv6-ra-filter.timer
 SOLICIT_FILE=/tmp/ffmuc-ipv6-ra-filter.solicit
+# PID of a run that renews the DHCPv4 and IPv6 configuration without the lock
+RENEW_FILE=/tmp/ffmuc-ipv6-ra-filter.renew
 COUNT_CHAIN=ffmuc_ra_count
 # Time in seconds that the node can be without a default route through the
 # selected router before the filter accepts all routers
@@ -126,15 +128,31 @@ last_prefixes() {
 	sed -n 's/.*|//p' "$LAST_FILE" 2>/dev/null
 }
 
-# Number of router solicitations since the default route is missing, and the
-# time for the next one
-solicit_delay() {
-	case "$(cat "$SOLICIT_FILE" 2>/dev/null)" in
-		'') echo "$SOLICIT_FIRST" ;;
-		1) echo "$SOLICIT_SECOND" ;;
-		2) echo "$SOLICIT_DELAY" ;;
+# Time of the next router solicitation. $1: the time since when the default
+# route is missing. SOLICIT_FILE has the number of router solicitations since
+# then and the time of the last one. Measure from the last one: a run that
+# comes late (it waited for the lock) must not send the next steps back to
+# back, because each one restarts odhcp6c.
+next_solicit() {
+	local n="" last=""
+
+	read -r n last 2>/dev/null < "$SOLICIT_FILE"
+	[ -n "$last" ] || { n=0; last="$1"; }
+	case "$n" in
+		0) echo $((last + SOLICIT_FIRST)) ;;
+		1) echo $((last + SOLICIT_SECOND - SOLICIT_FIRST)) ;;
+		2) echo $((last + SOLICIT_DELAY - SOLICIT_SECOND)) ;;
 		*) return 1 ;;
 	esac
+}
+
+# A gateway change run renews the configuration. It sends a router
+# solicitation itself (ifup client6).
+renew_running() {
+	local pid
+
+	pid="$(cat "$RENEW_FILE" 2>/dev/null)"
+	[ -n "$pid" ] && grep -q -F "$0" "/proc/$pid/cmdline" 2>/dev/null
 }
 
 # Ports of br-client with local clients: not the mesh (bat0) and not the node
@@ -515,6 +533,7 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		rm -f "$MISSING_FILE" "$SOLICIT_FILE"
 	elif [ ! -f "$MISSING_FILE" ]; then
 		echo "$now" > "$MISSING_FILE"
+		rm -f "$SOLICIT_FILE"
 	fi
 	missing_since="$(cat "$MISSING_FILE" 2>/dev/null)"
 
@@ -538,9 +557,10 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 			echo "$now" > "$FALLBACK_FILE"
 			use_fallback=1
 			log "$reason Accepting all router advertisements."
-		elif [ -n "$missing_since" ] && sdelay="$(solicit_delay)" &&
-			[ $((now - missing_since)) -ge "$sdelay" ]; then
-			echo $(($(cat "$SOLICIT_FILE" 2>/dev/null || echo 0) + 1)) > "$SOLICIT_FILE"
+		elif [ -n "$missing_since" ] && ! renew_running &&
+			nsol="$(next_solicit "$missing_since")" && [ "$now" -ge "$nsol" ]; then
+			read -r n _ 2>/dev/null < "$SOLICIT_FILE" || n=0
+			echo "$((${n:-0} + 1)) $now" > "$SOLICIT_FILE"
 			solicit=1
 		fi
 	fi
@@ -552,9 +572,8 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		next=$((last_seen + RA_TIMEOUT))
 		[ -n "$missing_since" ] && [ $((missing_since + FALLBACK_DELAY)) -lt "$next" ] &&
 			next=$((missing_since + FALLBACK_DELAY))
-		[ -n "$missing_since" ] && sdelay="$(solicit_delay)" &&
-			[ $((missing_since + sdelay)) -lt "$next" ] &&
-			next=$((missing_since + sdelay))
+		[ -n "$missing_since" ] && nsol="$(next_solicit "$missing_since")" &&
+			[ "$nsol" -lt "$next" ] && next="$nsol"
 		# Save the new router soon
 		[ "$solicit" = 1 ] && [ $((now + 2)) -lt "$next" ] && next=$((now + 2))
 		delay=$((next - now + 1))
@@ -627,9 +646,24 @@ if [ -z "$old_routers" ]; then
 	done
 	[ -n "$old_routers" ] && old_prefixes="$old_prefixes $(last_prefixes)"
 fi
-renew_client_config
 # Save the new prefixes soon. The node needs them if it becomes a gateway.
 schedule_check 10
 if { [ -n "$old_gw" ] || [ -n "$old_routers" ]; } && [ -n "$old_prefixes" ] && [ -x "$RA_GOODBYE" ]; then
 	start_deprecate "$old_prefixes" "$gw" client "$old_routers" "${count:-}"
+fi
+
+# The renewal can take some seconds (ifup, firewall reload). Do not hold the
+# lock in this time: the timer and hotplug runs would wait for it and then
+# send their router solicitations back to back. They send none while the
+# renewal runs.
+echo "$$" > "$RENEW_FILE"
+trap 'rm -f "$RENEW_FILE"' EXIT
+lock -u "$LOCK_FILE"
+renew_client_config
+lock "$LOCK_FILE"
+trap 'rm -f "$RENEW_FILE"; lock -u "$LOCK_FILE"' EXIT
+# ifup client6 sent a router solicitation. Count the next ones from now.
+if [ -f "$MISSING_FILE" ] && [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$gw" ]; then
+	echo "0 $(uptime_s)" > "$SOLICIT_FILE"
+	schedule_check $((SOLICIT_FIRST + 1))
 fi
