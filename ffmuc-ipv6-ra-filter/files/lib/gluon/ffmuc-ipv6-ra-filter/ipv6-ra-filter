@@ -16,6 +16,13 @@ TIMER_FILE=/tmp/ffmuc-ipv6-ra-filter.timer
 SOLICIT_FILE=/tmp/ffmuc-ipv6-ra-filter.solicit
 # PID of a run that renews the DHCPv4 and IPv6 configuration without the lock
 RENEW_FILE=/tmp/ffmuc-ipv6-ra-filter.renew
+# Time of the last restart of odhcp6c (ifup client6)
+CLIENT6_FILE=/tmp/ffmuc-ipv6-ra-filter.client6
+# Time in seconds that odhcp6c can need after a restart before client6 is up.
+# odhcp6c sends its router solicitation after 0, 4, 8 and 12 seconds, and
+# netifd sets client6 up about 11 seconds after the restart. A restart in this
+# time stops all of this, so do not restart odhcp6c before.
+CLIENT6_START=15
 COUNT_CHAIN=ffmuc_ra_count
 # Time in seconds that the node can be without a default route through the
 # selected router before the filter accepts all routers
@@ -146,6 +153,25 @@ next_solicit() {
 	esac
 }
 
+# Restart odhcp6c: it forgets all routers and sends a router solicitation
+restart_client6() {
+	uptime_s > "$CLIENT6_FILE"
+	ifup client6
+}
+
+# odhcp6c was restarted less than CLIENT6_START seconds ago, and client6 is not
+# up yet. Prints the time when this ends.
+client6_starting() {
+	local t
+
+	t="$(cat "$CLIENT6_FILE" 2>/dev/null)"
+	[ -n "$t" ] && [ "$(uptime_s)" -lt $((t + CLIENT6_START)) ] || return 1
+	case "$(ubus -S call network.interface.client6 status 2>/dev/null)" in
+		*'"up":true'*) return 1 ;;
+	esac
+	echo $((t + CLIENT6_START))
+}
+
 # A gateway change run renews the configuration. It sends a router
 # solicitation itself (ifup client6).
 renew_running() {
@@ -241,7 +267,7 @@ renew_client_config() {
 	fi
 
 	# Remove the addresses and the default route of the old router at once.
-	ifup client6
+	restart_client6
 }
 
 # On-link prefixes of the node
@@ -510,7 +536,8 @@ fi
 # default route through it: during the fallback, odhcp6c knows all routers,
 # and netifd installs only one of their default routes, which can be the
 # route of another router. Then restart odhcp6c, so that it forgets the
-# other routers.
+# other routers. Do all of this only when odhcp6c is not starting
+# (CLIENT6_START), because each step restarts odhcp6c.
 use_fallback=0
 stop_fallback=0
 solicit=0
@@ -536,9 +563,10 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 		rm -f "$SOLICIT_FILE"
 	fi
 	missing_since="$(cat "$MISSING_FILE" 2>/dev/null)"
+	starting="$(client6_starting)" || starting=""
 
 	if [ -f "$FALLBACK_FILE" ]; then
-		if [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
+		if [ -z "$starting" ] && [ "$last_seen" -gt "$(cat "$FALLBACK_FILE")" ]; then
 			rm -f "$FALLBACK_FILE" "$SOLICIT_FILE"
 			echo "$now" > "$MISSING_FILE"
 			missing_since="$now"
@@ -553,7 +581,9 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 			reason="No IPv6 default route through gateway $gw."
 		[ $((now - last_seen)) -ge "$RA_TIMEOUT" ] &&
 			reason="No router advertisement from gateway $gw for $((now - last_seen)) seconds."
-		if [ -n "$reason" ]; then
+		if [ -n "$starting" ]; then
+			:
+		elif [ -n "$reason" ]; then
 			echo "$now" > "$FALLBACK_FILE"
 			use_fallback=1
 			log "$reason Accepting all router advertisements."
@@ -567,7 +597,7 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 
 	if [ "$use_fallback" = 1 ]; then
 		# Check often whether the selected router is back
-		schedule_check 10
+		next=$((now + 10))
 	else
 		next=$((last_seen + RA_TIMEOUT))
 		[ -n "$missing_since" ] && [ $((missing_since + FALLBACK_DELAY)) -lt "$next" ] &&
@@ -576,10 +606,12 @@ if [ "$(uci -q get network.client6.proto)" = dhcpv6 ]; then
 			[ "$nsol" -lt "$next" ] && next="$nsol"
 		# Save the new router soon
 		[ "$solicit" = 1 ] && [ $((now + 2)) -lt "$next" ] && next=$((now + 2))
-		delay=$((next - now + 1))
-		[ "$delay" -lt 1 ] && delay=1
-		schedule_check "$delay"
 	fi
+	# A step that is due while odhcp6c starts comes when this ends
+	[ -n "$starting" ] && [ "$next" -lt "$starting" ] && next="$starting"
+	delay=$((next - now + 1))
+	[ "$delay" -lt 1 ] && delay=1
+	schedule_check "$delay"
 fi
 
 rules="$(ebtables-tiny -L "$CHAIN" | grep -e '-j ' | sed 's/ *$//')"
@@ -617,13 +649,13 @@ fi
 
 if [ "$use_fallback" = 1 ] && [ "$accept_rule" = 0 ]; then
 	# Request router advertisements from all routers now
-	ifup client6
+	restart_client6
 elif [ "$stop_fallback" = 1 ]; then
 	log "Restarting IPv6 to forget the other routers."
-	ifup client6
+	restart_client6
 elif [ "$solicit" = 1 ]; then
 	log "No IPv6 default route through gateway $gw for $((now - missing_since)) seconds. Requesting router advertisements again."
-	ifup client6
+	restart_client6
 fi
 
 [ "$gw_changed" = 1 ] || exit 0
