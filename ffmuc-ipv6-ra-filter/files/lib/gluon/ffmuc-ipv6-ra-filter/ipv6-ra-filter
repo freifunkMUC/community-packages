@@ -27,6 +27,16 @@ SOLICIT_DELAY=10
 # accepts all routers.
 MAX_RA_INTERVAL=60
 RA_TIMEOUT=$((3 * MAX_RA_INTERVAL))
+DEPRECATE_FILE=/tmp/ffmuc-ipv6-ra-filter.deprecate
+URADVD=/usr/sbin/uradvd
+# Time in seconds to wait for a prefix of the new router after a gateway change
+DEPRECATE_WAIT=45
+# uradvd sends one router advertisement at start and the next ones 3 to 4
+# seconds apart
+DEPRECATE_DURATION=8
+# Lower than the valid lifetime on the clients: they ignore a lower valid
+# lifetime (RFC 4862, 5.5.3 e) and keep the prefix as deprecated
+DEPRECATE_VALID=600
 
 log() {
 	logger -t ipv6_ra_filter "$*"
@@ -153,6 +163,86 @@ renew_client_config() {
 
 	# Remove the addresses and the default route of the old router at once.
 	ifup client6
+}
+
+# On-link prefixes of the node
+get_prefixes() {
+	ip -6 route show dev br-client 2>/dev/null |
+		awk '$1 ~ /\/64$/ && $1 !~ /^fe80:/ { print $1 }' | sort -u | tr '\n' ' '
+}
+
+own_ra_rule() {
+	local lladdr
+
+	lladdr="$(ip -6 addr show dev br-client scope link 2>/dev/null |
+		awk '$1 == "inet6" { sub(/\/.*/, "", $2); print $2; exit }')"
+	[ -n "$lladdr" ] || return 1
+	echo "INPUT -i br-client -s $lladdr -p ipv6-icmp --icmpv6-type router-advertisement -j DROP"
+}
+
+# Stop uradvd and remove the ip6tables rule of deprecate_old_prefixes
+cleanup_deprecate() {
+	local rule
+
+	kill "$(cat "$DEPRECATE_FILE" 2>/dev/null)" 2>/dev/null
+	rm -f "$DEPRECATE_FILE"
+	rule="$(own_ra_rule)" || return 0
+	# shellcheck disable=SC2086
+	ipt -C $rule 2>/dev/null && ipt -D $rule
+	return 0
+}
+
+stop_deprecate() {
+	local pid
+
+	# The job can be gone, and its PID can belong to another process now
+	pid="$(cat "$DEPRECATE_FILE.job" 2>/dev/null)"
+	[ -n "$pid" ] && grep -q -F "$0" "/proc/$pid/cmdline" 2>/dev/null && kill "$pid"
+	rm -f "$DEPRECATE_FILE.job"
+	cleanup_deprecate
+}
+
+# Tell the clients that the prefixes of the old router are deprecated. They
+# then use an address of the new router for new connections, and the old
+# router does not get their traffic. The node sends router advertisements from
+# its own link-local address with router lifetime 0 and preferred lifetime 0
+# for each old prefix. Other mesh nodes and the uplinks drop these router
+# advertisements, because they accept only the router of their gateway. Wait
+# for a new prefix first: if the new router announces the same prefix, the node
+# must not deprecate it.
+deprecate_old_prefixes() {
+	local old="$1" new="" stale="" args="" prefix rule waited=0
+
+	while [ "$waited" -lt "$DEPRECATE_WAIT" ]; do
+		new="$(get_prefixes)"
+		for prefix in $new; do
+			contains "$old" "$prefix" || break 2
+		done
+		sleep 1
+		waited=$((waited + 1))
+	done
+	for prefix in $old; do
+		contains "$new" "$prefix" && continue
+		stale="$stale $prefix"
+		args="$args -a $prefix"
+	done
+	[ -n "$stale" ] || return 0
+	[ "$(cat "$STATE_FILE" 2>/dev/null)" = "$2" ] || return 0
+
+	log "Deprecating the prefixes of the old router on the clients:$stale"
+	# The node receives its own router advertisements (multicast loop). Do not let
+	# odhcp6c add the old prefixes again.
+	# shellcheck disable=SC2086
+	if rule="$(own_ra_rule)" && ! ipt -C $rule 2>/dev/null; then
+		ipt -I $rule
+	fi
+	# shellcheck disable=SC2086
+	"$URADVD" -i br-client --default-lifetime 0 --preferred-lifetime 0 \
+		--valid-lifetime "$DEPRECATE_VALID" \
+		--min-router-adv-interval 3 --max-router-adv-interval 4 $args >/dev/null 2>&1 &
+	echo "$!" > "$DEPRECATE_FILE"
+	sleep "$DEPRECATE_DURATION"
+	cleanup_deprecate
 }
 
 lock "$LOCK_FILE"
@@ -335,4 +425,10 @@ fi
 [ "$(uci -q get network.client.proto)" = dhcp ] || exit 0
 
 log "Gateway changed from ${old_gw:-none} to $gw. Renewing DHCPv4 and IPv6 configuration."
+stop_deprecate
+old_prefixes="$(get_prefixes)"
 renew_client_config
+if [ -n "$old_gw" ] && [ -n "$old_prefixes" ] && [ -x "$URADVD" ]; then
+	(trap - EXIT; deprecate_old_prefixes "$old_prefixes" "$gw") >/dev/null 2>&1 &
+	echo "$!" > "$DEPRECATE_FILE.job"
+fi
