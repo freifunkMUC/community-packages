@@ -463,6 +463,21 @@ check "uradvd deprecates the prefix of the old gateway, not the own prefix" \
 check "router removal for the router of the old gateway" \
 	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
 
+echo "18. The selected gateway announces no client MAC address yet. The script"
+echo "    checks again after 3 s and then accepts only its router."
+setup
+up "$R1"
+cp "$SIM/tg" "$SIM/tg.full"; : > "$SIM/tg"
+echo "$O1" > "$SIM/gw"
+at 100; run
+check "accept all while the translation table is empty" 'in_fallback'
+check "check again after 3 s" '[ "$(cat "$SIM/timer" 2>/dev/null)" = 3 ]'
+cp "$SIM/tg.full" "$SIM/tg"
+at 103; run
+check "the filter accepts only the router of the selected gateway" \
+	'[ "$(cat "$SIM/ebt")" = "-s $R1 -j ACCEPT" ]'
+check "the gateway change is handled" 'grep -q "ifup client6" "$SIM/log"'
+
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi
 exit "$FAIL"
