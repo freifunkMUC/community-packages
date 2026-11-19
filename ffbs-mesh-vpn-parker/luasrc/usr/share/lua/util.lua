@@ -90,6 +90,36 @@ function util.prefer_ipv6()
 	return false
 end
 
+function util.wan_device()
+	-- The device of the WAN default route in table 1, or nil while there
+	-- is no WAN route. IPv6 first, as prefer_ipv6() does. This is br-wan
+	-- for a wired uplink and the modem device (e.g. wwan0) for a cellular
+	-- uplink.
+
+	for _, cmd in ipairs({ "ip -6 route show table 1", "ip -4 route show table 1" }) do
+		for line in string.gmatch(util.check_output(cmd), "[^\n]+") do
+			if string.find(line, "^default") then
+				local dev = string.match(line, " dev ([%w%._-]+)")
+				if dev ~= nil then
+					return dev
+				end
+			end
+		end
+	end
+	return nil
+end
+
+function util.wan_mtu()
+	-- The MTU the kernel uses for IPv6 on the WAN device, or nil while
+	-- there is no WAN route.
+
+	local dev = util.wan_device()
+	if dev == nil then
+		return nil
+	end
+	return tonumber(util.read_file("/proc/sys/net/ipv6/conf/" .. dev .. "/mtu") or "")
+end
+
 function util.split_endpoint(endpoint)
 	-- Split an endpoint into its host and its port part.
 	-- Understands "host:port" as well as "[v6-address]:port".
