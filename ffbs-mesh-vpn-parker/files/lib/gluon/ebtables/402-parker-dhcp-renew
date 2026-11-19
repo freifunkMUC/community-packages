@@ -1,0 +1,8 @@
+-- An active node serves DHCPv4 to its own clients. A client can still have a
+-- lease of another uplink, for example from the time when this node was a
+-- gateway client. The client renews it per unicast through the mesh, and the
+-- other uplink stays its IPv4 router. When the node is active, drop the DHCPv4
+-- requests of its own clients into the mesh (see noderoute.lua). The client
+-- then asks with a broadcast, and the node answers.
+chain('PARKER_DHCP', 'RETURN')
+rule('FORWARD -p IPv4 -o bat0 --ip-protocol udp --ip-destination-port 67 -j PARKER_DHCP')

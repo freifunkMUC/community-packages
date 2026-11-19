@@ -123,8 +123,13 @@ echo "$(cut -d. -f1 "$SIM/uptime") ifup $1" >> "$SIM/log"
 [ "$1" = client6 ] || exit 0
 # odhcp6c restarts: it forgets all routers and sends a router solicitation
 : > "$SIM/known"
-# The solicitation fails once (firewall reload)
-[ -f "$SIM/eperm" ] && { rm "$SIM/eperm"; exit 0; }
+# The solicitation fails (firewall reload): once, or as many times as the
+# file says
+if [ -f "$SIM/eperm" ]; then
+	n=$(($(cat "$SIM/eperm" 2>/dev/null || echo 1) - 1))
+	[ "$n" -gt 0 ] && echo "$n" > "$SIM/eperm" || rm "$SIM/eperm"
+	exit 0
+fi
 for mac in $(cat "$SIM/alive"); do "$SIM/bin/ra" "$mac"; done
 EOF
 	cat > "$SIM/bin/ra" <<'EOF'
@@ -477,6 +482,24 @@ at 103; run
 check "the filter accepts only the router of the selected gateway" \
 	'[ "$(cat "$SIM/ebt")" = "-s $R1 -j ACCEPT" ]'
 check "the gateway change is handled" 'grep -q "ifup client6" "$SIM/log"'
+
+echo "19. After the gateway change, the first two router solicitations fail"
+echo "    (the DHCPv4 renewal and the new lease reload the firewall). The next"
+echo "    one comes 6 s after the gateway change and gets the router."
+setup
+up "$R1"; up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; wait_job
+echo 2 > "$SIM/eperm"         # ifup client6 at the change and at 3 s fail
+echo "$O1" > "$SIM/gw"
+at 200; run; wait_job
+at 203; run
+check "no default route after 2 failed solicitations" '[ ! -s "$SIM/known" ]'
+at 206; run
+check "new router solicitation 6 s after the gateway change" 'grep -q "^206 ifup client6" "$SIM/log"'
+at 210; run
+check "no solicitation at 10 s, the router is known" '! grep -q "^210 ifup client6" "$SIM/log"'
+final_state
 
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi

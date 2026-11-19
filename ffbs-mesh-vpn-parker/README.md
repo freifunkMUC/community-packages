@@ -70,6 +70,14 @@ Without the DHCPNAK, the client keeps the old uplink as its router until the lea
 The node does not keep the address when batman-adv has seen another node with this address in the last 60 seconds (an uplink that has become active with the same address).
 It does a check at each `noderoute` cycle (at most 30 seconds apart).
 
+A client of an active node can still have a lease of another uplink, for example from the time when the node was a gateway client.
+The client renews this lease per unicast through the mesh, and the other uplink stays its IPv4 router.
+If that uplink fails, the client has no IPv4, although its own node is healthy.
+Thus an active node drops the DHCPv4 requests of its clients into the mesh (chain `PARKER_DHCP`, `/lib/gluon/ebtables/402-parker-dhcp-renew`).
+The client then sends its request as a broadcast (after 87.5 % of the lease time) or a new DHCPDISCOVER (at the end of the lease), and the node answers.
+Thus the client changes to its own node after at most 2 minutes. Until then, it uses the other uplink.
+`tests/dhcp-renew-test.sh` (in the package directory) tests the chain with the kernel bridge (see the script for the command).
+
 The code is in `/usr/share/lua/parker/dhcpnak.lua`.
 
 IPv6 after a gateway change
