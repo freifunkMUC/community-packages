@@ -69,7 +69,7 @@ EOF
 	cat > "$SIM/bin/uci" <<'EOF'
 #!/bin/sh
 case "$3" in
-network.client6.proto) echo dhcpv6 ;;
+network.client6.proto) cat "$SIM/proto6" 2>/dev/null || echo dhcpv6 ;;
 network.client.proto) echo dhcp ;;
 esac
 EOF
@@ -110,7 +110,9 @@ case "$*" in
 	echo "default via fe80::$(tail -n 1 "$SIM/known" | tr -d :) dev br-client proto static metric 512" ;;
 "-6 route show dev br-client") for mac in $(cat "$SIM/known"); do
 	awk -v m="$mac" '$1 == m { print $2 " proto static metric 256 pref medium" }' "$SIM/prefix"
-done ;;
+done
+# The own static prefix of an uplink
+[ -s "$SIM/ownroute" ] && echo "$(cat "$SIM/ownroute") proto static metric 256 pref medium" ;;
 "-6 addr show dev br-client scope link") echo "    inet6 fe80::1/64 scope link" ;;
 "-6 neigh show dev br-client to "*) [ -f "$SIM/nolladdr" ] && { echo "$7 router FAILED"; exit; }; echo "$7 lladdr $(echo "$7" | sed 's/fe80:://; s/\(..\)/\1:/g; s/:$//') router REACHABLE" ;;
 esac
@@ -440,6 +442,25 @@ at 200; run; at 210; run      # the node has the prefix, but no router entry
 echo server > "$SIM/mode"
 at 211; run; wait_job
 check "router removal for the last router" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
+
+echo "17. The uplink comes back. client6 is static with the own prefix before"
+echo "    batman-adv is in server mode, and a run without a gateway comes first."
+setup
+up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; at 110; run      # gateway client: R2 gives 2001:db8:2::/64
+echo static > "$SIM/proto6"   # noderoute: uplink active, network reload
+: > "$SIM/known"; : > "$SIM/gw"
+echo 2001:db8:1::/64 > "$SIM/ownroute"
+at 200; run                   # gw uevent: no gateway, still client mode
+echo server > "$SIM/mode"
+printf '2001:db8:1::/64\n' > "$SIM/range6"
+daemon "uradvd -i br-client --default-lifetime 180 -a 2001:db8:1::/64"
+at 203; run; wait_job
+check "uradvd deprecates the prefix of the old gateway, not the own prefix" \
+	'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd" && ! grep -q "2001:db8:1::" "$SIM/uradvd"'
+check "router removal for the router of the old gateway" \
 	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
 
 rm -rf "$SIM"
