@@ -17,6 +17,7 @@ O1=5e:dd:a8:05:04:6b
 R1=52:54:00:aa:01:00
 O2=3e:30:b1:77:ed:3b
 R2=52:54:00:aa:06:00
+OWN=02:00:00:00:00:01
 
 FAIL=0
 SIM=""
@@ -29,6 +30,7 @@ setup() {
 	: > "$SIM/ebt"; : > "$SIM/ipt"; : > "$SIM/known"; : > "$SIM/alive"; : > "$SIM/log"
 	: > "$SIM/drop"; : > "$SIM/uradvd"; : > "$SIM/goodbye"
 	mkdir -p "$SIM/brif/bat0" "$SIM/brif/local-port" "$SIM/brif/client0" "$SIM/brif/eth0.1"
+	echo "$OWN" > "$SIM/braddr"
 	printf '%s 2001:db8:1::/64\n%s 2001:db8:2::/64\n' "$R1" "$R2" > "$SIM/prefix"
 	echo 0 > "$SIM/ra_count"
 	echo "0.00 0.00" > "$SIM/uptime"
@@ -38,6 +40,8 @@ setup() {
 		-e "s#/var/run/#$SIM/#" -e "s#/usr/sbin/uradvd#$SIM/bin/uradvd#" \
 		-e "s#/lib/gluon/ffmuc-ipv6-ra-filter/ra-goodbye#$SIM/bin/ra-goodbye#" \
 		-e "s#/sys/class/net/br-client/brif#$SIM/brif#" \
+		-e "s#/sys/class/net/br-client/address#$SIM/braddr#" \
+		-e "s#/etc/ffmuc-ipv6-ra-filter.last#$SIM/last#" \
 		-e "s#/tmp/range6#$SIM/range6#" -e "s#/tmp/parker-sites/#$SIM/#" \
 		-e 's#< "/proc/$pid/cmdline"#< "$SIM/proc/$pid/cmdline"#' \
 		-e 's#(sleep "$1"; exec "$0") >/dev/null 2>&1 &#echo "$1" > "$SIM/timer"; return#' \
@@ -117,6 +121,8 @@ echo "$(cut -d. -f1 "$SIM/uptime") ifup $1" >> "$SIM/log"
 [ "$1" = client6 ] || exit 0
 # odhcp6c restarts: it forgets all routers and sends a router solicitation
 : > "$SIM/known"
+# The solicitation fails once (firewall reload)
+[ -f "$SIM/eperm" ] && { rm "$SIM/eperm"; exit 0; }
 for mac in $(cat "$SIM/alive"); do "$SIM/bin/ra" "$mac"; done
 EOF
 	cat > "$SIM/bin/ra" <<'EOF'
@@ -124,6 +130,9 @@ EOF
 # A router advertisement from $1 arrives at the node
 grep -q -x -e "-s $1 -j ACCEPT" -e "-j ACCEPT" "$SIM/ebt" || exit 0
 grep -q -x -F "$1" "$SIM/ipt" && echo $(($(cat "$SIM/ra_count") + 1)) > "$SIM/ra_count"
+# odhcp6c does not run: the kernel counts the router advertisement, but the
+# node learns no route and no prefix
+[ -f "$SIM/dead" ] && exit 0
 grep -v -x -F "$1" "$SIM/known" > "$SIM/known.n"; echo "$1" >> "$SIM/known.n"; mv "$SIM/known.n" "$SIM/known"
 EOF
 	cat > "$SIM/bin/pidof" <<'EOF'
@@ -233,12 +242,10 @@ wait_job
 check "no router advertisement at the first gateway" '[ ! -s "$SIM/uradvd" ]'
 echo "$O1" > "$SIM/gw"
 at 200; run; wait_job
-check "uradvd deprecates only the old prefix" \
-	'grep -q -e "--default-lifetime 0 --preferred-lifetime 0 --valid-lifetime 600 .* -a 2001:db8:2::/64 |" "$SIM/uradvd" &&
-	! grep -q "2001:db8:1::" "$SIM/uradvd" && [ "$(wc -l < "$SIM/uradvd")" -eq 1 ]'
-check "the node drops its own router advertisements while uradvd runs" \
-	'grep -q "| drop: INPUT -i br-client -s fe80::1 -p ipv6-icmp --icmpv6-type router-advertisement -j DROP$" "$SIM/uradvd"'
-check "the drop rule is removed after uradvd" '[ ! -s "$SIM/drop" ]'
+check "router lifetime 0 for the old router, only the old prefix, only on the client ports" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
+check "no uradvd on br-client: nothing goes into the mesh (bat0)" '[ ! -s "$SIM/uradvd" ]'
+check "no drop rule" '[ ! -s "$SIM/drop" ]'
 final_state
 
 echo "5. The new router announces the same prefix. The node deprecates nothing."
@@ -249,7 +256,7 @@ echo "$O2" > "$SIM/gw"
 at 100; run
 echo "$O1" > "$SIM/gw"
 at 200; run; wait_job
-check "no uradvd" '[ ! -s "$SIM/uradvd" ]'
+check "no deprecation" '[ ! -s "$SIM/goodbye" ] && [ ! -s "$SIM/uradvd" ]'
 
 echo "6. The gateway changes again before the new router answers. The old job"
 echo "   does not deprecate the prefix of the new gateway."
@@ -268,7 +275,7 @@ at 205; run
 check "the old job is stopped" '! job_alive "$job"'
 fast_sleep
 wait_job
-check "no uradvd" '[ ! -s "$SIM/uradvd" ]'
+check "no deprecation" '[ ! -s "$SIM/goodbye" ] && [ ! -s "$SIM/uradvd" ]'
 
 # The router advertisement daemon of the gateway: $1 is its command line
 daemon() { mkdir -p "$SIM/proc/100"; printf '%s' "$1" | tr ' ' '\0' > "$SIM/proc/100/cmdline"; }
@@ -348,20 +355,21 @@ check "router lifetime 0 from the link-local and MAC address of the old router" 
 check "not into the mesh (bat0) and not to the node (local-port)" \
 	'! grep -q -e bat0 -e local-port "$SIM/goodbye"'
 check "not in the name of the new router" '! grep -q "$R1" "$SIM/goodbye"'
-check "uradvd deprecates the old prefix as before" 'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd"'
+check "no uradvd on br-client" '[ ! -s "$SIM/uradvd" ]'
 final_state
 
 echo "12. The MAC address of the old router is not known. The node does not send"
 echo "    router lifetime 0 in its name."
 setup
 up "$R1"; up "$R2"
+: > "$SIM/nolladdr"
 echo "$O2" > "$SIM/gw"
 at 100; run
-: > "$SIM/nolladdr"
 echo "$O1" > "$SIM/gw"
 at 200; run; wait_job
-check "no router lifetime 0" '[ ! -s "$SIM/goodbye" ]'
-check "uradvd deprecates the old prefix" 'grep -q -e "-a 2001:db8:2::/64 |" "$SIM/uradvd"'
+check "the node deprecates the old prefix from its own address, only on the client ports" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::1 -m $OWN -v 600 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
+check "no uradvd on br-client" '[ ! -s "$SIM/uradvd" ]'
 
 echo "13. The node has no local client port. It sends nothing in the name of the"
 echo "    old router."
@@ -372,7 +380,67 @@ echo "$O2" > "$SIM/gw"
 at 100; run
 echo "$O1" > "$SIM/gw"
 at 200; run; wait_job
-check "no router lifetime 0" '[ ! -s "$SIM/goodbye" ]'
+check "nothing sent" '[ ! -s "$SIM/goodbye" ] && [ ! -s "$SIM/uradvd" ]'
+
+echo "14. After the gateway change, odhcp6c on the node fails (firewall reload)."
+echo "    The node sends the router removal at the first router advertisement of"
+echo "    the new router, and solicits again after 3 s."
+setup
+up "$R1"; up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; wait_job
+: > "$SIM/eperm"; : > "$SIM/dead"
+slow_sleep
+echo "$O1" > "$SIM/gw"
+at 200; run
+/bin/sleep 0.3
+check "no router removal before the new router answers" '[ ! -s "$SIM/goodbye" ]'
+ra "$R1"                      # periodic router advertisement of the new router
+/bin/sleep 0.8
+check "router removal at once, without the prefix on the node" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
+fast_sleep; wait_job
+rm -f "$SIM/dead"
+at 203; run
+check "new router solicitation 3 s after the gateway change" 'grep -q "^203 ifup client6" "$SIM/log"'
+final_state
+
+echo "15. Reboot: the node selects a gateway \"from none\". It removes its last"
+echo "    router (from flash) on its clients when that router is not the new one."
+setup
+up "$R1"; up "$R2"
+echo "fe80::525400aa0600,$R2 |2001:db8:2::/64 " > "$SIM/last"
+echo "$O1" > "$SIM/gw"
+at 100; run; wait_job
+check "router removal for the last router" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
+final_state
+at 110; run
+check "the new router is saved" 'grep -q "^fe80::525400aa0100,$R1 |2001:db8:1::/64 $" "$SIM/last"'
+setup
+up "$R1"; up "$R2"
+echo "fe80::525400aa0100,$R1 |2001:db8:1::/64 " > "$SIM/last"
+echo "$O1" > "$SIM/gw"
+at 100; run; wait_job
+check "no router removal when the last router is the new one" '[ ! -s "$SIM/goodbye" ]'
+
+echo "16. Network reload of an uplink: a short client phase without a default"
+echo "    route, then server again. It removes its last router on its clients."
+setup
+up "$R2"
+echo "$O2" > "$SIM/gw"
+at 100; run; at 110; run      # an earlier client phase: R2 is saved
+echo server > "$SIM/mode"
+printf '2001:db8:1::/64\n' > "$SIM/range6"
+daemon "uradvd -i br-client --default-lifetime 180 -a 2001:db8:1::/64"
+at 150; run; wait_job
+: > "$SIM/goodbye"
+rm "$SIM/mode"; : > "$SIM/nolladdr"
+at 200; run; at 210; run      # the node has the prefix, but no router entry
+echo server > "$SIM/mode"
+at 211; run; wait_job
+check "router removal for the last router" \
+	'[ "$(cat "$SIM/goodbye")" = "-s fe80::525400aa0600 -m $R2 -n 3 -t 3 -p 2001:db8:2::/64 client0 eth0.1" ]'
 
 rm -rf "$SIM"
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi

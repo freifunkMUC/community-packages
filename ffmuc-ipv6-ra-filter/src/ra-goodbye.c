@@ -3,14 +3,14 @@
 // Send a router advertisement with router lifetime 0 in the name of another
 // router: from its link-local address and its MAC address. The clients then
 // remove their default route through this router at once, and deprecate the
-// listed prefixes (preferred lifetime 0, valid lifetime 0).
+// listed prefixes (preferred lifetime 0, valid lifetime 0 or the value of -v).
 //
 // The frame goes directly out of each interface on the command line (packet
 // socket). It does not pass the bridge. Thus give only the local client ports,
 // never bat0.
 //
 // Usage: ra-goodbye -s ROUTER_LLADDR -m ROUTER_MAC [-p PREFIX/LEN]...
-//                   [-n COUNT] [-t SECONDS] IFACE...
+//                   [-v VALID] [-n COUNT] [-t SECONDS] IFACE...
 
 #include <arpa/inet.h>
 #include <linux/if_packet.h>
@@ -36,7 +36,7 @@
 static void usage(void)
 {
 	fprintf(stderr, "Usage: ra-goodbye -s ROUTER_LLADDR -m ROUTER_MAC [-p PREFIX/LEN]... "
-		"[-n COUNT] [-t SECONDS] IFACE...\n");
+		"[-v VALID] [-n COUNT] [-t SECONDS] IFACE...\n");
 	exit(2);
 }
 
@@ -100,8 +100,10 @@ int main(int argc, char *argv[])
 	uint8_t mac[6], frame[ETH_HLEN_ + IP6_HLEN + RA_HLEN + SLLA_LEN + MAX_PREFIXES * PI_LEN];
 	int n_prefixes = 0, count = 1, interval = 3, have_src = 0, have_mac = 0;
 	int opt, fd, sent = 0;
+	uint32_t valid = 0;
+	char *end;
 
-	while ((opt = getopt(argc, argv, "s:m:p:n:t:")) != -1) {
+	while ((opt = getopt(argc, argv, "s:m:p:v:n:t:")) != -1) {
 		switch (opt) {
 		case 's':
 			if (inet_pton(AF_INET6, optarg, &src) != 1 || !IN6_IS_ADDR_LINKLOCAL(&src))
@@ -118,6 +120,11 @@ int main(int argc, char *argv[])
 			    parse_prefix(optarg, &prefixes[n_prefixes], &prefix_lens[n_prefixes]))
 				usage();
 			n_prefixes++;
+			break;
+		case 'v':
+			valid = strtoul(optarg, &end, 10);
+			if (!*optarg || *end)
+				usage();
 			break;
 		case 'n':
 			count = atoi(optarg);
@@ -164,12 +171,16 @@ int main(int argc, char *argv[])
 	memcpy(opt_p + 2, mac, 6);
 	opt_p += SLLA_LEN;
 
-	// Prefix information: on-link, autonomous, valid and preferred lifetime 0
+	// Prefix information: on-link, autonomous, preferred lifetime 0
 	for (int i = 0; i < n_prefixes; i++, opt_p += PI_LEN) {
 		opt_p[0] = ND_OPT_PREFIX_INFORMATION;
 		opt_p[1] = 4;
 		opt_p[2] = prefix_lens[i];
 		opt_p[3] = ND_OPT_PI_FLAG_ONLINK | ND_OPT_PI_FLAG_AUTO;
+		opt_p[4] = valid >> 24;
+		opt_p[5] = valid >> 16;
+		opt_p[6] = valid >> 8;
+		opt_p[7] = valid;
 		memcpy(opt_p + 16, &prefixes[i], 16);
 	}
 
