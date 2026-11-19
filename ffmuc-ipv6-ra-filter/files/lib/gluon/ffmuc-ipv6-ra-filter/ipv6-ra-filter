@@ -41,6 +41,10 @@ DEPRECATE_VALID=600
 PREFIX_FILE=/tmp/ffmuc-ipv6-ra-filter.prefixes
 PARKER_RA_STATE=/tmp/parker-sites/ra-state
 PARKER_RANGE6=/tmp/range6
+# Default routers of the node while it is a batman gateway client
+ROUTER_FILE=/tmp/ffmuc-ipv6-ra-filter.routers
+RA_GOODBYE=/lib/gluon/ffmuc-ipv6-ra-filter/ra-goodbye
+BRIF_DIR=/sys/class/net/br-client/brif
 
 log() {
 	logger -t ipv6_ra_filter "$*"
@@ -81,17 +85,38 @@ uptime_s() {
 	cut -d. -f1 /proc/uptime
 }
 
-# MAC addresses of the IPv6 default routers of the node
-get_default_router_macs() {
+# IPv6 default routers of the node that have a known MAC address, as
+# LLADDR,MAC. The routes come from the router advertisements, so these are the
+# source addresses of the router advertisements.
+get_default_routers() {
 	ip -6 route show default dev br-client 2>/dev/null | awk '{
 		for (i = 1; i < NF; i++)
 			if ($i == "via") print $(i + 1)
 	}' | while read -r router; do
-		ip -6 neigh show dev br-client to "$router" | awk '{
+		ip -6 neigh show dev br-client to "$router" | awk -v r="$router" '{
 			for (i = 1; i < NF; i++)
-				if ($i == "lladdr") print $(i + 1)
+				if ($i == "lladdr") print r "," $(i + 1)
 		}'
 	done
+}
+
+# MAC addresses of the IPv6 default routers of the node
+get_default_router_macs() {
+	get_default_routers | sed 's/.*,//'
+}
+
+# Ports of br-client with local clients: not the mesh (bat0) and not the node
+# itself (local-port)
+get_client_ports() {
+	local port
+
+	for port in "$BRIF_DIR"/*; do
+		port="${port##*/}"
+		case "$port" in
+			bat0|local-port|'*') ;;
+			*) echo "$port" ;;
+		esac
+	done | tr '\n' ' '
 }
 
 # Run the script again after $1 seconds. Only one timer runs, unless the new
@@ -217,7 +242,8 @@ own_ra_rule() {
 cleanup_deprecate() {
 	local rule
 
-	kill "$(cat "$DEPRECATE_FILE" 2>/dev/null)" 2>/dev/null
+	# shellcheck disable=SC2046
+	kill $(cat "$DEPRECATE_FILE" 2>/dev/null) 2>/dev/null
 	rm -f "$DEPRECATE_FILE"
 	rule="$(own_ra_rule)" || return 0
 	# shellcheck disable=SC2086
@@ -241,7 +267,15 @@ stop_deprecate() {
 # router announces the same prefix, the node must not deprecate it.
 #
 # $1: old prefixes. $2: the selected gateway (empty on a gateway); the job
-# stops when it changes. $3: client or server.
+# stops when it changes. $3: client or server. $4: old routers (LLADDR,MAC).
+#
+# The clients still have a default route through each old router, and the
+# router advertisements of the node cannot remove it. When an old router is
+# alive, it drops the packets with a source address of the new prefix. Thus
+# the node also sends router lifetime 0 in the name of each old router, from
+# its link-local and MAC address. These go only out of the local client
+# ports, never into the mesh: the clients of other nodes can still use the
+# old router.
 #
 # client: the node sends router advertisements from its own link-local address
 # with router lifetime 0 and preferred lifetime 0 for each old prefix. Other
@@ -255,7 +289,7 @@ stop_deprecate() {
 # them on. Thus use valid lifetime 0: nodes and clients that do not know the
 # old prefix ignore it (RFC 4862, 5.5.3 d), and the others only deprecate it.
 deprecate_old_prefixes() {
-	local old="$1" new="" stale="" args="" prefix rule waited=0
+	local old="$1" new="" stale="" args="" pargs="" prefix rule waited=0 pids ports router
 	local lifetime=0 valid="$DEPRECATE_VALID"
 
 	while [ "$waited" -lt "$DEPRECATE_WAIT" ]; do
@@ -277,6 +311,7 @@ deprecate_old_prefixes() {
 		contains "$new" "$prefix" && continue
 		stale="$stale $prefix"
 		args="$args -a $prefix"
+		pargs="$pargs -p $prefix"
 	done
 	[ -n "$stale" ] || return 0
 	[ "$(cat "$STATE_FILE" 2>/dev/null)" = "$2" ] || return 0
@@ -292,7 +327,18 @@ deprecate_old_prefixes() {
 	"$URADVD" -i br-client --default-lifetime "$lifetime" --preferred-lifetime 0 \
 		--valid-lifetime "$valid" \
 		--min-router-adv-interval 3 --max-router-adv-interval 4 $args >/dev/null 2>&1 &
-	echo "$!" > "$DEPRECATE_FILE"
+	pids="$!"
+	ports="$(get_client_ports)"
+	if [ -n "$4" ] && [ -n "$ports" ] && [ -x "$RA_GOODBYE" ]; then
+		for router in $4; do
+			log "Removing the old router ${router%,*} (${router#*,}) on the local clients: $ports"
+			# shellcheck disable=SC2086
+			"$RA_GOODBYE" -s "${router%,*}" -m "${router#*,}" -n 3 -t 3 \
+				$pargs $ports >/dev/null 2>&1 &
+			pids="$pids $!"
+		done
+	fi
+	echo "$pids" > "$DEPRECATE_FILE"
 	sleep "$DEPRECATE_DURATION"
 	cleanup_deprecate
 }
@@ -328,14 +374,16 @@ if batctl gw_mode 2>/dev/null | grep -qw '^server'; then
 	if [ -n "$old_prefixes" ]; then
 		# The node was a gateway client before
 		stop_deprecate
-		[ -x "$URADVD" ] && start_deprecate "$old_prefixes" "" server
+		[ -x "$URADVD" ] && start_deprecate "$old_prefixes" "" server "$(cat "$ROUTER_FILE" 2>/dev/null)"
 	fi
-	rm -f "$PREFIX_FILE"
+	rm -f "$PREFIX_FILE" "$ROUTER_FILE"
 	exit 0
 fi
 
 prefixes="$(get_prefixes)"
 [ -n "$prefixes" ] && echo "$prefixes" > "$PREFIX_FILE"
+routers="$(get_default_routers | tr '\n' ' ')"
+[ -n "$routers" ] && echo "$routers" > "$ROUTER_FILE"
 
 gw="$(get_gateway)"
 if [ -z "$gw" ]; then
@@ -497,9 +545,13 @@ fi
 log "Gateway changed from ${old_gw:-none} to $gw. Renewing DHCPv4 and IPv6 configuration."
 stop_deprecate
 old_prefixes="$(get_prefixes)"
+old_routers=""
+for router in $(get_default_routers); do
+	contains "$want" "${router#*,}" || old_routers="$old_routers $router"
+done
 renew_client_config
 # Save the new prefixes soon. The node needs them if it becomes a gateway.
 schedule_check 10
 if [ -n "$old_gw" ] && [ -n "$old_prefixes" ] && [ -x "$URADVD" ]; then
-	start_deprecate "$old_prefixes" "$gw" client
+	start_deprecate "$old_prefixes" "$gw" client "$old_routers"
 fi
