@@ -1,5 +1,6 @@
 local clientaddr = require("clientaddr")
 local dhcp = require("parker.dhcp")
+local dhcpnak = require("parker.dhcpnak")
 local json = require("jsonc")
 local util = require("util")
 local uci = require("uci")
@@ -294,8 +295,11 @@ local function apply_network(conf, target_state, address4, mtu)
 	local xlat_config_deleted = false
 	local first_time_active_since_boot = false
 	local dhcp_options_changed = false
+	-- Our client address while we routed for the clients, see parker/dhcpnak.lua.
+	local nak_cidr = nil
 
 	if target_state == true then
+		dhcpnak.stop()
 		util.log("network: routing state: active")
 		local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
 		-- Offset 1 is our own address and the last one is the broadcast
@@ -314,7 +318,10 @@ local function apply_network(conf, target_state, address4, mtu)
 		end
 
 		uci_set("dhcp", DHCP_IFACE, "interface", DHCP_IFACE)
-		uci_set("dhcp", DHCP_IFACE, "leasetime", "3m")
+		-- Short leases: after a gateway change, a client of the old uplink
+		-- asks again after 1 min at the latest (see parker/dhcpnak.lua).
+		-- 2m is the minimum of dnsmasq.
+		uci_set("dhcp", DHCP_IFACE, "leasetime", "2m")
 		uci_set("dhcp", DHCP_IFACE, "start", start)
 		uci_set("dhcp", DHCP_IFACE, "limit", limit)
 		uci_set("dhcp", DHCP_IFACE, "force", "1")
@@ -342,6 +349,9 @@ local function apply_network(conf, target_state, address4, mtu)
 		-- target_state == false
 		util.log("network: routing state: inactive")
 
+		if uci.get("network", DHCP_IFACE, "proto") == "static" then
+			nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
+		end
 		uci_set("network", DHCP_IFACE, "proto", "dhcp")
 		-- dnsmasq stops its DHCPD-job when the interface is not 'proto static'
 
@@ -394,6 +404,10 @@ local function apply_network(conf, target_state, address4, mtu)
 			util.log("..." .. DHCP_IFACE .. " did not settle within " .. NETWORK_TIMEOUT .. "s. Continuing anyway.")
 		end
 		changed = true
+	end
+
+	if nak_cidr ~= nil then
+		dhcpnak.start(nak_cidr)
 	end
 
 	if first_time_active_since_boot then
@@ -535,6 +549,8 @@ local function apply_network(conf, target_state, address4, mtu)
 end
 
 local function update(report)
+	dhcpnak.expire()
+
 	-- if there already are changes in uci, abort
 	if sections_changed() then
 		util.log("UCI is dirty. Refusing to reconfigure node.")
