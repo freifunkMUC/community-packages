@@ -429,6 +429,14 @@ local function apply_network(conf, target_state, address4, mtu)
 		util.sleep(1)
 		util.log("HACK: continuing with network reload")
 		os.execute("/etc/init.d/network reload")
+		if not target_state then
+			-- The reload restarted odhcp6c. Tell ffmuc-ipv6-ra-filter, so
+			-- that it does not restart odhcp6c again while it starts.
+			local uptime = util.read_file("/proc/uptime")
+			if uptime then
+				util.write_file("/tmp/ffmuc-ipv6-ra-filter.client6", uptime:match("^%d+") .. "\n")
+			end
+		end
 		util.log("Network reload finished. Waiting for " .. DHCP_IFACE .. " to be reconfigured...")
 		if util.wait_for(function()
 			return network_applied(address4, target_state)
