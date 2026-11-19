@@ -464,6 +464,9 @@ for _ in 1 2 3 4 5; do
 done
 if [ -z "$want" ]; then
 	accept_all "Gateway $gw announces no client MAC address."
+	# The translation table of a new gateway can arrive later than the gw
+	# uevent. Do not wait for the next run of micron.
+	schedule_check 3
 	exit 2
 fi
 
