@@ -1,0 +1,5 @@
+# shellcheck shell=sh
+# Runs after 50-gluon-wan-dnsmasq for the same interfaces.
+if grep -qxFe "$INTERFACE" /lib/gluon/wan-dnsmasq/interface.d/*; then
+	/lib/gluon/ffmuc-cellular-wan-dns/update.lua
+fi
