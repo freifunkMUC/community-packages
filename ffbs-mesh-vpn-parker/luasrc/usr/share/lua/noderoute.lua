@@ -343,6 +343,11 @@ local function apply_network(conf, target_state, address4, mtu)
 		if not util.check_output("ebtables-tiny -L PARKER_RADV"):find("DROP") then
 			os.execute("ebtables-tiny -A PARKER_RADV -j DROP")
 		end
+		-- Our clients must not renew a lease of another uplink (see
+		-- /lib/gluon/ebtables/402-parker-dhcp-renew).
+		if not util.check_output("ebtables-tiny -L PARKER_DHCP"):find("DROP") then
+			os.execute("ebtables-tiny -A PARKER_DHCP -j DROP")
+		end
 		if util.read_file("/tmp/parker_online") == nil then
 			os.execute("touch /tmp/parker_online")
 			first_time_active_since_boot = true
@@ -378,6 +383,7 @@ local function apply_network(conf, target_state, address4, mtu)
 		end
 
 		os.execute("ebtables-tiny -F PARKER_RADV")
+		os.execute("ebtables-tiny -F PARKER_DHCP")
 	end
 
 	local changed = sections_changed()
