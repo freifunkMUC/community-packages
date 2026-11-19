@@ -56,7 +56,9 @@ shift 2; echo "$(cut -d. -f1 "$SIM/uptime") $*" >> "$SIM/log"
 EOF
 	cat > "$SIM/bin/lock" <<'EOF'
 #!/bin/sh
-exit 0
+# A run waits while another run holds the lock
+if [ "$1" = -u ]; then rmdir "$2.d" 2>/dev/null; exit 0; fi
+while ! mkdir "$1.d" 2>/dev/null; do /bin/sleep 0.02; done
 EOF
 	cat > "$SIM/bin/batctl" <<'EOF'
 #!/bin/sh
@@ -120,6 +122,10 @@ EOF
 	cat > "$SIM/bin/ifup" <<'EOF'
 #!/bin/sh
 echo "$(cut -d. -f1 "$SIM/uptime") ifup $1" >> "$SIM/log"
+# A slow DHCPv4 renewal (ifup, firewall reload): wait until the test releases it
+if [ "$1" = client ] && [ -f "$SIM/slow" ]; then
+	while [ ! -f "$SIM/release" ]; do /bin/sleep 0.05; done
+fi
 [ "$1" = client6 ] || exit 0
 # odhcp6c restarts: it forgets all routers and sends a router solicitation
 : > "$SIM/known"
@@ -293,7 +299,7 @@ setup
 up "$R2"
 echo "$O2" > "$SIM/gw"
 at 100; run                   # gateway client: R2 gives 2001:db8:2::/64
-check "check again after 10 s" '[ "$(cat "$SIM/timer" 2>/dev/null)" = 10 ]'
+check "check again soon (4 s after the renewal)" '[ "$(cat "$SIM/timer" 2>/dev/null)" = 4 ]'
 at 110; run
 echo server > "$SIM/mode"
 printf '2001:db8:1::/64\n' > "$SIM/range6"
@@ -499,6 +505,35 @@ at 206; run
 check "new router solicitation 6 s after the gateway change" 'grep -q "^206 ifup client6" "$SIM/log"'
 at 210; run
 check "no solicitation at 10 s, the router is known" '! grep -q "^210 ifup client6" "$SIM/log"'
+final_state
+
+echo "20. The DHCPv4 renewal of the gateway change run takes 11 s (ifup and"
+echo "    firewall reload). The timer runs in this time do not wait for it and"
+echo "    send no router solicitation. After the renewal, the router"
+echo "    solicitations come 3 s apart, not back to back."
+setup
+up "$R1"; up "$R2"
+: > "$SIM/slow"
+echo 1 > "$SIM/eperm"         # the router solicitation of the renewal fails
+echo "$O1" > "$SIM/gw"
+at 200; run & g=$!            # gateway change "from none"
+/bin/sleep 0.5
+at 204; run & t1=$!; /bin/sleep 0.5
+at 207; run & t2=$!; /bin/sleep 0.5
+at 210; run & t3=$!; /bin/sleep 0.5
+check "the timer runs do not wait for the renewal" \
+	'! kill -0 $t1 2>/dev/null && ! kill -0 $t2 2>/dev/null && ! kill -0 $t3 2>/dev/null'
+check "no router solicitation while the renewal runs" '! grep -q "ifup client6" "$SIM/log"'
+at 211; : > "$SIM/release"
+wait $g $t1 $t2 $t3
+check "one router solicitation, at the end of the renewal" '[ "$(grep -c "ifup client6" "$SIM/log")" = 1 ]'
+check "next check 4 s after the renewal" '[ "$(cat "$SIM/timer" 2>/dev/null)" = 4 ]'
+at 213; run
+check "no router solicitation 2 s after the renewal" '[ "$(grep -c "ifup client6" "$SIM/log")" = 1 ]'
+at 214; run
+check "next router solicitation 3 s after the renewal" 'grep -q "^214 ifup client6" "$SIM/log"'
+at 215; run
+check "no router solicitation 1 s after the last one" '! grep -q "^215 ifup client6" "$SIM/log"'
 final_state
 
 rm -rf "$SIM"
