@@ -55,7 +55,7 @@ package.preload["posix.sys.socket"] = function()
 end
 
 local real_popen = io.popen
-io.popen = function(cmd)
+io.popen = function(cmd) -- luacheck: ignore 122
 	if cmd:match("^batctl") then
 		local out = sim.now >= sim.neighbour_at and "aa:bb:cc:dd:ee:01 0.1s\n" or ""
 		return { read = function() return out end, close = function() end }
@@ -79,29 +79,27 @@ local function run(title, drop_window, neighbour_at, stats, probe_timeout)
 	local burst_accepted = sim.accepted - (ok and 1 or 0)
 	print(("  sent=%d ok=%s probed=%d s, t=%d s, dropped=%d, accepted=%d")
 		:format(sent, tostring(ok), probed, sim.now, sim.dropped, sim.accepted))
-	return sent, ok, probed, burst_accepted
+	return { sent = sent, ok = ok, probed = probed, acc = burst_accepted }
 end
 
-local sent, ok, probed, acc
-
-sent, ok, probed, acc = run("1. BLA drops broadcasts for 33 s, neighbour after 2 s", 33, 2, true)
-check("probe passes", ok)
+local r = run("1. BLA drops broadcasts for 33 s, neighbour after 2 s", 33, 2, true)
+check("probe passes", r.ok)
 check("burst starts after the drop window", sim.now >= 33 and sim.now <= 34)
-check("bat0 drops no packet of the burst", acc == bcast.COUNT and sent == bcast.COUNT)
+check("bat0 drops no packet of the burst", r.acc == bcast.COUNT and r.sent == bcast.COUNT)
 
-sent, ok, probed, acc = run("2. No drop window (BLA off)", 0, 2, true)
-check("probe passes at once", ok and probed == 0)
-check("burst sent without delay", sim.now == 2 and acc == bcast.COUNT)
+r = run("2. No drop window (BLA off)", 0, 2, true)
+check("probe passes at once", r.ok and r.probed == 0)
+check("burst sent without delay", sim.now == 2 and r.acc == bcast.COUNT)
 
-sent, ok, probed, acc = run("3. Drops do not stop within the probe timeout", 1000, 2, true)
-check("probe fails", not ok)
-check("burst sent anyway after 60 s", sent == bcast.COUNT and probed == 60 and sim.now == 62)
+r = run("3. Drops do not stop within the probe timeout", 1000, 2, true)
+check("probe fails", not r.ok)
+check("burst sent anyway after 60 s", r.sent == bcast.COUNT and r.probed == 60 and sim.now == 62)
 
-sent, ok, probed, acc = run("4. tx_dropped cannot be read", 33, 2, false)
-check("burst sent anyway without waiting", sent == bcast.COUNT and not ok and sim.now == 2)
+r = run("4. tx_dropped cannot be read", 33, 2, false)
+check("burst sent anyway without waiting", r.sent == bcast.COUNT and not r.ok and sim.now == 2)
 
-sent, ok = run("5. No neighbour within the timeout", 0, 1000, true)
-check("nothing sent", sent == 0 and sim.dropped + sim.accepted == 0)
+r = run("5. No neighbour within the timeout", 0, 1000, true)
+check("nothing sent", r.sent == 0 and sim.dropped + sim.accepted == 0)
 
 os.execute("rm -rf " .. sysfs)
 if failed > 0 then
