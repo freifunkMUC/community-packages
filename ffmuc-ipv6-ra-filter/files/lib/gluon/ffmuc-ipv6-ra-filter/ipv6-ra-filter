@@ -25,7 +25,7 @@ SOLICIT_DELAY=10
 # Maximum router advertisement interval of the gateways. When no router
 # advertisement of the selected router arrives for 3 intervals, the filter
 # accepts all routers.
-MAX_RA_INTERVAL=100
+MAX_RA_INTERVAL=60
 RA_TIMEOUT=$((3 * MAX_RA_INTERVAL))
 
 log() {

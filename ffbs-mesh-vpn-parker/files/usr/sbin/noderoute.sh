@@ -9,6 +9,9 @@ cycle_stamp="${tmpdir}noderoute-cycle"
 # A tunnel counts as usable while its last handshake is younger than this.
 # Keep in sync with noderoute.lua.
 HANDSHAKE_MAX_AGE=180
+# parker-sites (multi-site operation) and how old its status may be.
+sites_status=/tmp/parker-sites/status
+SITES_STATUS_MAX_AGE=30
 # Shortest possible time between two cycles.
 CYCLE_SLEEP=10
 # How much longer we idle at the end of a cycle if nothing happens.
@@ -66,11 +69,21 @@ recover_batman() {
 	done
 }
 
+no_site_up() {
+	# Multi-site operation: parker-sites finds no site up. Keep in sync
+	# with noderoute.lua.
+	[ -f "$sites_status" ] && grep -qx 'active=nil' "$sites_status" &&
+		[ $(($(date +%s) - $(date -r "$sites_status" +%s))) -le "$SITES_STATUS_MAX_AGE" ]
+}
+
 active_tunnels() {
 	# The wg-interfaces with a recent handshake, i.e. the tunnels
 	# noderoute.lua considers usable.
 	wg show all latest-handshakes |
 		awk -v max_age="$HANDSHAKE_MAX_AGE" '$3 > 0 && systime() - $3 < max_age { printf "%s ", $1 }'
+	if no_site_up; then
+		printf "no-site-up"
+	fi
 }
 
 new_config() {

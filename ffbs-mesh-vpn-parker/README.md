@@ -72,6 +72,26 @@ It does a check at each `noderoute` cycle (at most 30 seconds apart).
 
 The code is in `/usr/share/lua/parker/dhcpnak.lua`.
 
+IPv6 after a gateway change
+---------------------------
+
+When the node stops routing for its clients, it first sends router advertisements for 8 seconds with:
+
+* router lifetime 0, and
+* preferred lifetime 0 for each prefix.
+
+The clients then stop using the node as router at once and use the router of another uplink.
+The node sends these router advertisements before it leaves gateway mode, because the mesh nodes only pass on the router advertisements of their selected gateway.
+The code is in `/usr/share/lua/parker/ragoodbye.lua`.
+
+In multi-site operation, the node also stops routing at once when `parker-sites` finds no site up (`active=nil` in `/tmp/parker-sites/status`).
+It does not wait until the WireGuard handshakes are 180 seconds old.
+
+`parker-sites` sends a router lifetime of 180 seconds and a preferred lifetime of 180 seconds for the active prefix, with router advertisements at most 60 seconds apart.
+The two lifetimes are equal, so that a client does not keep an address of an uplink after its route through this uplink has ended.
+This lifetime only applies when the node stops without router lifetime 0, for example at a power loss.
+Android ignores router lifetimes below 180 seconds.
+
 Client addresses
 ----------------
 
