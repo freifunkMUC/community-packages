@@ -100,7 +100,7 @@ Without OGMs, the metric to the gateway does not change.
 Thus after a power loss of the selected uplink, the mesh nodes have no IPv4 uplink for about 200 seconds.
 
 The firmware must add the batman-adv patch `tests/gw-stale-vm/2003-batman-adv-gw-skip-stale-gateways.patch`.
-With this patch, batman-adv skips a gateway when no OGM of it arrived for 10 originator intervals (10 seconds with the default of 1 second).
+With this patch, batman-adv skips a gateway when no OGM of it arrived for 3 originator intervals (15 seconds with the Gluon interval of 5 seconds, at least 5 seconds).
 Then it selects the best other gateway and sends a `gw` uevent.
 batman-adv keeps a stale gateway when no other gateway has OGMs.
 A gateway that comes back is selected again only by the normal rules (`gw_sel_class`). This prevents flapping.

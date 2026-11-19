@@ -10,34 +10,36 @@ up() { cut -d' ' -f1 /proc/uptime; }
 ip link add name sw type bridge; ip link set dev sw up
 for x in a b; do ip netns add $x; done
 mk() { # name ns
-  ip link add name e$1 type veth peer name s$1; ip link set dev s$1 master sw; ip link set dev s$1 up
-  [ -n "$2" ] && ip link set dev e$1 netns $2
+	ip link add name e$1 type veth peer name s$1; ip link set dev s$1 master sw; ip link set dev s$1 up
+	[ -n "$2" ] && ip link set dev e$1 netns $2
 }
 mk n ""; mk a a; mk b b
 setup() { # ns-prefix iface
-  $1 ip link add name bat0 type batadv; $1 ip link set dev e$2 master bat0; $1 ip link set dev e$2 up; $1 ip link set dev bat0 up
+	$1 ip link add name bat0 type batadv; $1 ip link set dev e$2 master bat0; $1 ip link set dev e$2 up; $1 ip link set dev bat0 up
 }
 setup "" n; setup "ip netns exec a" a; setup "ip netns exec b" b
 ip netns exec a batctl gw_mode server 100mbit/100mbit
 ip netns exec b batctl gw_mode server 100mbit/100mbit
 batctl gw_mode client
+# Gluon sets the originator interval to 5000 ms
+for ns in "" "ip netns exec a" "ip netns exec b"; do $ns batctl it 5000; done
 MA=$(ip netns exec a cat /sys/class/net/ea/address); MB=$(ip netns exec b cat /sys/class/net/eb/address)
 # orig address = primary hardif MAC
 sel() { batctl gwl -H 2>/dev/null | grep '^\*' | awk '{print $2}'; }
 name() { case "$1" in $MA) echo a;; $MB) echo b;; "") echo none;; *) echo "$1";; esac; }
-echo "=== MODULE $(cat /proc/cmdline | grep -o 'mod=[a-z]*')"
+echo "=== MODULE $(grep -o 'mod=[a-z]*' /proc/cmdline)"
 t=0; while [ -z "$(sel)" ] && [ $t -lt 120 ]; do sleep 1; t=$((t+1)); done
-sleep 15
+sleep 30
 S=$(name $(sel)); echo "SELECTED $S at $(up)"; batctl gwl -H
 cut_gw() { ip link set dev s$1 down; }
 restore_gw() { ip link set dev s$1 up; }
 measure() { # expect change away from $1, max $2 s
-  t0=$(up); i=0
-  while [ $i -lt $(($2*2)) ]; do
-    c=$(name $(sel)); if [ "$c" != "$1" ]; then echo "SWITCH $1 -> $c after $(awk -v a=$t0 -v b=$(up) 'BEGIN{print b-a}') s"; return; fi
-    sleep 0.5; i=$((i+1))
-  done
-  echo "NO SWITCH from $1 within $2 s (still $(name $(sel)))"
+	t0=$(up); i=0
+	while [ $i -lt $(($2*2)) ]; do
+		c=$(name $(sel)); if [ "$c" != "$1" ]; then echo "SWITCH $1 -> $c after $(awk -v a=$t0 -v b=$(up) 'BEGIN{print b-a}') s"; return; fi
+		sleep 0.5; i=$((i+1))
+	done
+	echo "NO SWITCH from $1 within $2 s (still $(name $(sel)))"
 }
 echo "--- T1: power loss of the selected gw $S"
 cut_gw $S; measure $S 260

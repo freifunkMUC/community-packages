@@ -7,7 +7,7 @@ A gateway that loses power stays selected until the neighbor purge
 and the router towards it stays until the purge. In this time the clients
 of the mesh have no IPv4 uplink.
 
-Mark a gateway as stale when no OGM of it arrived for 10 originator
+Mark a gateway as stale when no OGM of it arrived for 3 originator
 intervals (at least 5 s). The election skips stale gateways, and a stale
 selected gateway causes a new election. A stale gateway stays selected
 when no other gateway has OGMs. A gateway that comes back is selected
@@ -159,7 +159,7 @@ index 97ea71a..ff42169 100644
   */
  #define BATADV_PURGE_TIMEOUT 200000 /* 200 seconds */
 +/* a gateway without an OGM for this many originator intervals is stale */
-+#define BATADV_GW_STALE_INTERVALS 10
++#define BATADV_GW_STALE_INTERVALS 3
 +#define BATADV_GW_STALE_TIMEOUT_MIN 5000 /* 5 seconds */
  #define BATADV_TT_LOCAL_TIMEOUT 600000 /* in milliseconds */
  #define BATADV_TT_CLIENT_ROAM_TIMEOUT 600000 /* in milliseconds */
