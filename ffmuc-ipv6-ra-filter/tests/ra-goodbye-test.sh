@@ -70,7 +70,16 @@ check "the client removed the default route" \
 check "the client deprecated the address" \
 	'ip netns exec client ip -6 addr show dev c0 | grep "2001:db8:2:" | grep -q deprecated'
 check "nothing on the mesh port" '! grep -q "router advertisement" /tmp/mesh.txt'
-check "bad arguments are refused" '! /tmp/ra-goodbye -s 2001:db8::1 -m "$MAC" port0 2>/dev/null'
+tcpdump -i port0 -n -vv -c 1 'icmp6 and ip6[40] == 134' > /tmp/port.txt 2>/dev/null &
+cap=$!
+sleep 1
+/tmp/ra-goodbye -s "$LL" -m "$MAC" -v 600 -p 2001:db8:2::/64 -n 1 port0
+sleep 1
+kill "$cap" 2>/dev/null || true
+check "-v sets the valid lifetime" \
+	'grep -q "valid time 600s, pref. time 0s" /tmp/port.txt && grep -q "icmp6 sum ok" /tmp/port.txt'
+check "bad arguments are refused" '! /tmp/ra-goodbye -s 2001:db8::1 -m "$MAC" port0 2>/dev/null &&
+	! /tmp/ra-goodbye -s "$LL" -m "$MAC" -v x port0 2>/dev/null'
 
 if [ "$FAIL" = 0 ]; then echo "All tests passed."; else echo "Some tests failed."; fi
 exit "$FAIL"
