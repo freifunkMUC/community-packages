@@ -89,8 +89,9 @@ local T = {
 	-- ignore lifetimes below 180 s (accept_ra_min_lft). uradvd sets the
 	-- PREF64 lifetime to 3 x max interval, rounded down to 8 s: 176 s.
 	-- A state change does not wait for the interval: SIGHUP sends RAs at once.
-	-- A node that stops routing sends router lifetime 0 (noderoute). The
-	-- lifetime only counts when the node stops without that (power loss).
+	-- A node that stops routing sends router lifetime 0 when a new router is
+	-- there (parker/ragoodbye.lua). Else, and at a power loss, this lifetime
+	-- counts.
 	-- 180 s is the lowest value Android accepts; with RAs at most 60 s
 	-- apart, the clients can lose two RAs in a row.
 	ra_lifetime = 180,
@@ -605,11 +606,16 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 	local restart = update_file(STATE .. "/ra-args", ra_args .. "\n")
 	local pid = uradvd_pid()
 	if update_file(STATE .. "/ra-state", ra_state) or restart or (active and not pid) then
-		if pid and not restart then
-			sh("kill -HUP " .. pid)
-		elseif active then
+		if not active then
 			-- With no active site, noderoute makes the node a mesh client.
-			-- It must then send no RAs.
+			-- It must then send no RAs. A uradvd that still runs with the
+			-- old state announces a dead router and a preferred prefix.
+			if pid then
+				sh("/etc/init.d/parker-radvd stop")
+			end
+		elseif pid and not restart then
+			sh("kill -HUP " .. pid)
+		else
 			sh("/etc/init.d/parker-radvd restart")
 		end
 		log("RA: " .. ra_state:gsub("\n", ";") .. " active " .. tostring(active))
@@ -659,7 +665,8 @@ end
 -- The statistics for ffbs-parker-respondd. The default routes are device
 -- routes, so respondd cannot read the pgw from them.
 --   * gateway, gateway6, gateway_nexthop: the pgw and tunnel of the active
---     site.
+--     site. gateway is the pgw address6, as gateway6, so that yanic can
+--     link it to the pgw node. Only without address6 it is "name (site)".
 --   * mesh_vpn: one group per site with its pgw, in the format of
 --     gluon-mesh-vpn-fastd. "established" is the time since the site is up,
 --     "method" is "active", "standby" or "down".
@@ -677,7 +684,7 @@ local function respondd_json(conf, names, db, iface, active, now)
 		peers[pgw.name or iface[name] or name] = peer
 		ret.mesh_vpn.groups[name] = { peers = peers }
 		if name == active then
-			ret.gateway = (pgw.name or pgw.address4 or pgw.address6 or "?") .. " (" .. name .. ")"
+			ret.gateway = pgw.address6 or ((pgw.name or pgw.address4 or "?") .. " (" .. name .. ")")
 			ret.gateway6 = pgw.address6
 			ret.gateway_nexthop = iface[name]
 		end

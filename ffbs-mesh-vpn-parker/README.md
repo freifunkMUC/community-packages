@@ -75,8 +75,14 @@ A client of an active node can still have a lease of another uplink, for example
 The client renews this lease per unicast through the mesh, and the other uplink stays its IPv4 router.
 If that uplink fails, the client has no IPv4, although its own node is healthy.
 Thus an active node drops the DHCPv4 requests of its clients into the mesh (chain `PARKER_DHCP`, `/lib/gluon/ebtables/402-parker-dhcp-renew`).
-The client then sends its request as a broadcast (after 87.5 % of the lease time) or a new DHCPDISCOVER (at the end of the lease), and the node answers.
+After 87.5 % of the lease time, the client sends its request as a broadcast.
+dnsmasq is not authoritative (`/lib/gluon/upgrade/905-dhcp-not-authoritative`), so it does not answer a request for a lease that it did not give.
+An authoritative dnsmasq answers with a DHCPACK for the same address, but with the router address of this node.
+Some clients (Android 11) then lose their IPv4 default route until they connect again.
+At the end of the lease, the client sends a DHCPDISCOVER and gets a new lease from its own node.
 Thus the client changes to its own node after at most 2 minutes. Until then, it uses the other uplink.
+The node does not change an address for this. Thus no two nodes use the same address at the same time.
+`tests/dhcp-authoritative-test.sh` tests the answers of dnsmasq with and without authoritative.
 `tests/dhcp-renew-test.sh` (in the package directory) tests the chain with the kernel bridge (see the script for the command).
 
 The code is in `/usr/share/lua/parker/dhcpnak.lua`.
@@ -84,21 +90,36 @@ The code is in `/usr/share/lua/parker/dhcpnak.lua`.
 IPv6 after a gateway change
 ---------------------------
 
-When the node stops routing for its clients, it first sends router advertisements for 8 seconds with:
+When the node stops routing for its clients, it stops its router advertisement daemon.
+It does not tell the clients at once that it is no longer their router.
+A client without a default router sees a loss of provisioning: Android 15 with CLAT (IPv6-only) then disconnects from the Wi-Fi.
 
-* router lifetime 0, and
-* preferred lifetime 0 for each prefix.
+The script `/usr/sbin/parker-ra-goodbye` waits until the node has an IPv6 default route through another router on `br-client` and a preferred address of a prefix of another node (at most 180 seconds).
+An uplink without tunnels also sends router advertisements, but only with deprecated prefixes. It is not a new router.
+Then it waits 2 seconds more and sends router advertisements for 8 seconds with:
 
-The clients then stop using the node as router at once and use the router of another uplink.
-The node sends these router advertisements before it leaves gateway mode, because the mesh nodes only pass on the router advertisements of their selected gateway.
-The code is in `/usr/share/lua/parker/ragoodbye.lua`.
+* router lifetime 0,
+* preferred lifetime 0 and valid lifetime 600 seconds for each prefix.
+
+The clients then use the new router and its prefix.
+While the script sends, an ip6tables rule (mangle table, `INPUT`) drops the router advertisements of the node itself.
+
+When no new router comes in 180 seconds, the script sends nothing.
+The router lifetime on the clients then ends by itself.
+When the uplink comes back before, the node cancels the script and the clients continue without a change.
+In multi-site mode, the script also sends nothing when a site of the node is up again (`/tmp/parker-sites/ra-state` has a preferred prefix). This occurs when all uplinks come back at the same time and the other router comes first.
+
+The clients of the other mesh nodes select a new gateway.
+`ffmuc-ipv6-ra-filter` on their node removes the old router when the new router is there.
+The code is in `/usr/share/lua/parker/ragoodbye.lua` and `/usr/sbin/parker-ra-goodbye`.
+`tests/ra-goodbye-test.sh` tests the script with mock commands.
 
 In multi-site operation, the node also stops routing at once when `parker-sites` finds no site up (`active=nil` in `/tmp/parker-sites/status`).
 It does not wait until the WireGuard handshakes are 180 seconds old.
 
 `parker-sites` sends a router lifetime of 180 seconds and a preferred lifetime of 180 seconds for the active prefix, with router advertisements at most 60 seconds apart.
 The two lifetimes are equal, so that a client does not keep an address of an uplink after its route through this uplink has ended.
-This lifetime only applies when the node stops without router lifetime 0, for example at a power loss.
+This lifetime applies when the node stops without router lifetime 0: when no new router comes, or at a power loss.
 Android ignores router lifetimes below 180 seconds.
 
 Gateway after a power loss

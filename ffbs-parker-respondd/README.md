@@ -37,7 +37,10 @@ In multi-site operation (see ffbs-mesh-vpn-parker), the default routes
 have no gateway address. Then `parker-sites` writes the fields to
 `/tmp/parker-sites/respondd.json`, and this module sends that file:
 
-* `gateway`: the name of the pgw and the site of the active site, for
+* `gateway`: the IPv6 link-local address of the pgw of the active site,
+  the same as `gateway6`. Thus yanic links it to the pgw node, and
+  Meshviewer shows the pgw name in the "IPv4" row. If the pgw has no
+  IPv6 address, the value is the name of the pgw and the site, for
   example `pgw01 (muc)`.
 * `gateway6` and `gateway_nexthop`: the pgw and the tunnel of the active
   site.
