@@ -606,11 +606,16 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 	local restart = update_file(STATE .. "/ra-args", ra_args .. "\n")
 	local pid = uradvd_pid()
 	if update_file(STATE .. "/ra-state", ra_state) or restart or (active and not pid) then
-		if pid and not restart then
-			sh("kill -HUP " .. pid)
-		elseif active then
+		if not active then
 			-- With no active site, noderoute makes the node a mesh client.
-			-- It must then send no RAs.
+			-- It must then send no RAs. A uradvd that still runs with the
+			-- old state announces a dead router and a preferred prefix.
+			if pid then
+				sh("/etc/init.d/parker-radvd stop")
+			end
+		elseif pid and not restart then
+			sh("kill -HUP " .. pid)
+		else
 			sh("/etc/init.d/parker-radvd restart")
 		end
 		log("RA: " .. ra_state:gsub("\n", ";") .. " active " .. tostring(active))
