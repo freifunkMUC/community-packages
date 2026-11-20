@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2016,SC2034,SC2329
+# shellcheck disable=SC2016,SC2034,SC2317,SC2329
 # Test of /usr/sbin/parker-ra-goodbye with mock commands (ip, ip6tables,
 # uradvd, logger). It does not need a Gluon node.
 # Run: sh tests/ra-goodbye-test.sh (from the package directory, busybox sh
