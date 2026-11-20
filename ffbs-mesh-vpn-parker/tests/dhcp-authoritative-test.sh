@@ -12,7 +12,7 @@ DIR=$(cd "$(dirname "$0")/.." && pwd)
 FAIL=0
 PID=""
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
 	[ -n "$PID" ] && kill "$PID" 2>/dev/null
 	ip netns del cl 2>/dev/null || true
