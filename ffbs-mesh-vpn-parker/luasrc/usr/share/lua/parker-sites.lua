@@ -659,7 +659,8 @@ end
 -- The statistics for ffbs-parker-respondd. The default routes are device
 -- routes, so respondd cannot read the pgw from them.
 --   * gateway, gateway6, gateway_nexthop: the pgw and tunnel of the active
---     site.
+--     site. gateway is the pgw address6, as gateway6, so that yanic can
+--     link it to the pgw node. Only without address6 it is "name (site)".
 --   * mesh_vpn: one group per site with its pgw, in the format of
 --     gluon-mesh-vpn-fastd. "established" is the time since the site is up,
 --     "method" is "active", "standby" or "down".
@@ -677,7 +678,7 @@ local function respondd_json(conf, names, db, iface, active, now)
 		peers[pgw.name or iface[name] or name] = peer
 		ret.mesh_vpn.groups[name] = { peers = peers }
 		if name == active then
-			ret.gateway = (pgw.name or pgw.address4 or pgw.address6 or "?") .. " (" .. name .. ")"
+			ret.gateway = pgw.address6 or ((pgw.name or pgw.address4 or "?") .. " (" .. name .. ")")
 			ret.gateway6 = pgw.address6
 			ret.gateway_nexthop = iface[name]
 		end
