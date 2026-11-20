@@ -23,6 +23,8 @@ cat > "$SIM/bin/ip" <<'EOF'
 case "$*" in
 "-6 addr show dev br-client scope link")
 	printf '5: br-client: <UP>\n    inet6 fe80::1/64 scope link\n' ;;
+"-6 addr show dev br-client scope global")
+	cat "$SIM/addr" 2>/dev/null ;;
 "-6 route show default dev br-client")
 	cat "$SIM/route" 2>/dev/null ;;
 esac
@@ -56,6 +58,8 @@ check() {
 reset() {
 	rm -f "$SIM/route" "$SIM/ra-state" "$SIM/ipt" "$SIM/uradvd" "$SIM/uradvd.pid" "$SIM/log" "$PID_FILE"
 	: > "$SIM/ipt"
+	# A preferred address of the new router's prefix
+	printf '    inet6 2001:db8:3::5/64 scope global dynamic noprefixroute\n' > "$SIM/addr"
 }
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
 
@@ -132,5 +136,14 @@ printf '2001:db8:1::/64,180,600\n' > "$SIM/ra-state"
 wait "$job"
 check "multi-site, own site up again: no uradvd" '[ ! -e "$SIM/uradvd" ]'
 check "multi-site, own site up again: log" 'grep -q "a site of this node is up again" "$SIM/log"'
+
+# 8. A router with deprecated prefixes only (an uplink without tunnels) and
+# deprecated own prefixes: not a new router, no router lifetime 0.
+reset
+printf '    inet6 2001:db8:3::5/64 scope global deprecated dynamic\n    inet6 2001:db8:1::5/64 scope global dynamic\n' > "$SIM/addr"
+echo "default via $NEW dev br-client" > "$SIM/route"
+sh "$SCRIPT" 2 1 600 2001:db8:1::/64
+check "dead router (deprecated prefixes only): no uradvd" '[ ! -e "$SIM/uradvd" ]'
+check "dead router: log no new router" 'grep -q "No new IPv6 router after 2s" "$SIM/log"'
 
 exit "$FAIL"

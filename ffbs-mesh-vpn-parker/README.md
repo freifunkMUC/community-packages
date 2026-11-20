@@ -94,7 +94,8 @@ When the node stops routing for its clients, it stops its router advertisement d
 It does not tell the clients at once that it is no longer their router.
 A client without a default router sees a loss of provisioning: Android 15 with CLAT (IPv6-only) then disconnects from the Wi-Fi.
 
-The script `/usr/sbin/parker-ra-goodbye` waits until the node has an IPv6 default route through another router on `br-client` (at most 180 seconds).
+The script `/usr/sbin/parker-ra-goodbye` waits until the node has an IPv6 default route through another router on `br-client` and a preferred address of a prefix of another node (at most 180 seconds).
+An uplink without tunnels also sends router advertisements, but only with deprecated prefixes. It is not a new router.
 Then it waits 2 seconds more and sends router advertisements for 8 seconds with:
 
 * router lifetime 0,

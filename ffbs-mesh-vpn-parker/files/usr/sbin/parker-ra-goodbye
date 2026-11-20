@@ -24,14 +24,25 @@ GRACE=2
 [ $# -ge 4 ] || exit 1
 wait_max=$1 duration=$2 valid=$3
 shift 3
+OWN_PREFIXES="$*"
 
 own_lladdr() {
 	ip -6 addr show dev "$IFACE" scope link 2>/dev/null |
 		awk '$1 == "inet6" { sub(/\/.*/, "", $2); print $2; exit }'
 }
 
-# A default route through a router that is not this node
+# A default route through a router that is not this node, and a preferred
+# address of a prefix that is not of this node. An uplink without tunnels
+# also sends router advertisements, but only with deprecated prefixes: it is
+# not a new router.
 new_router() {
+	ip -6 addr show dev "$IFACE" scope global 2>/dev/null | awk -v own="$OWN_PREFIXES" '
+		BEGIN { n = split(own, p, " "); for (i = 1; i <= n; i++) { sub(/\/.*/, "", p[i]); sub(/:+$/, ":", p[i]) } }
+		$1 == "inet6" && !/ deprecated/ {
+			for (i = 1; i <= n; i++) if (index($2, p[i]) == 1) next
+			found = 1
+		}
+		END { exit !found }' || return 0
 	ip -6 route show default dev "$IFACE" 2>/dev/null | awk -v own="$1" '{
 		for (i = 1; i < NF; i++)
 			if ($i == "via" && $(i + 1) != own) { print $(i + 1); exit }
