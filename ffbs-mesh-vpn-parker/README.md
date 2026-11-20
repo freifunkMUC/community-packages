@@ -106,6 +106,7 @@ While the script sends, an ip6tables rule (mangle table, `INPUT`) drops the rout
 When no new router comes in 180 seconds, the script sends nothing.
 The router lifetime on the clients then ends by itself.
 When the uplink comes back before, the node cancels the script and the clients continue without a change.
+In multi-site mode, the script also sends nothing when a site of the node is up again (`/tmp/parker-sites/ra-state` has a preferred prefix). This occurs when all uplinks come back at the same time and the other router comes first.
 
 The clients of the other mesh nodes select a new gateway.
 `ffmuc-ipv6-ra-filter` on their node removes the old router when the new router is there.

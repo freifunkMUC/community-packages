@@ -16,7 +16,7 @@ SIM=$(mktemp -d)
 cleanup() { rm -rf "$SIM"; }
 trap cleanup EXIT
 mkdir "$SIM/bin"
-export SIM PID_FILE="$SIM/pid" URADVD="$SIM/bin/uradvd"
+export SIM PID_FILE="$SIM/pid" URADVD="$SIM/bin/uradvd" RA_STATE="$SIM/ra-state"
 
 cat > "$SIM/bin/ip" <<'EOF'
 #!/bin/sh
@@ -54,7 +54,7 @@ check() {
 	fi
 }
 reset() {
-	rm -f "$SIM/route" "$SIM/ipt" "$SIM/uradvd" "$SIM/uradvd.pid" "$SIM/log" "$PID_FILE"
+	rm -f "$SIM/route" "$SIM/ra-state" "$SIM/ipt" "$SIM/uradvd" "$SIM/uradvd.pid" "$SIM/log" "$PID_FILE"
 	: > "$SIM/ipt"
 }
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
@@ -112,5 +112,25 @@ kill "$job"
 sleep 1
 check "cancel while sending: script and uradvd stopped" '! alive "$job" && ! alive "$upid"'
 check "cancel while sending: rule removed" '[ "$(grep -c -e " -D INPUT " "$SIM/ipt")" = 1 ]'
+
+# 6. Multi-site: all sites of the node are down, then the new router comes.
+reset
+printf '2001:db8:1::/64,0,600\nrdnss 2001:db8:1::1\n' > "$SIM/ra-state"
+echo "default via $NEW dev br-client" > "$SIM/route"
+sh "$SCRIPT" 30 1 600 2001:db8:1::/64
+check "multi-site, own sites down: router lifetime 0" '[ -e "$SIM/uradvd" ]'
+
+# 7. Multi-site: a site of the node comes back before the grace time ends
+# (all uplinks back at the same time): no router lifetime 0.
+reset
+printf '2001:db8:1::/64,0,600\n' > "$SIM/ra-state"
+sh "$SCRIPT" 30 2 600 2001:db8:1::/64 &
+job=$!
+sleep 1
+echo "default via $NEW dev br-client" > "$SIM/route"
+printf '2001:db8:1::/64,180,600\n' > "$SIM/ra-state"
+wait "$job"
+check "multi-site, own site up again: no uradvd" '[ ! -e "$SIM/uradvd" ]'
+check "multi-site, own site up again: log" 'grep -q "a site of this node is up again" "$SIM/log"'
 
 exit "$FAIL"

@@ -15,6 +15,8 @@
 IFACE=br-client
 PID_FILE=${PID_FILE:-/tmp/parker-ra-goodbye.pid}
 URADVD=${URADVD:-/usr/sbin/uradvd}
+# Multi-site mode: the prefixes of this node with "PREFIX,PREFERRED,VALID"
+RA_STATE=${RA_STATE:-/tmp/parker-sites/ra-state}
 # Time from the first router advertisement of the new router to the default
 # route on the clients
 GRACE=2
@@ -34,6 +36,14 @@ new_router() {
 		for (i = 1; i < NF; i++)
 			if ($i == "via" && $(i + 1) != own) { print $(i + 1); exit }
 	}'
+}
+
+# In multi-site mode, a site of this node is up again when parker-sites
+# announces a prefix with a preferred lifetime. When all uplinks come back at
+# the same time, the other router can come first, before noderoute cancels
+# this script.
+own_site_up() {
+	awk -F, '$2 > 0 { up = 1 } END { exit !up }' "$RA_STATE" 2>/dev/null
 }
 
 ipt() {
@@ -77,6 +87,10 @@ while [ -z "$router" ]; do
 	router=$(new_router "$own")
 done
 nap "$GRACE"
+if own_site_up; then
+	logger -t parker-ra-goodbye "New IPv6 router $router after ${waited}s, but a site of this node is up again. Sending no router lifetime 0."
+	exit 0
+fi
 
 args=""
 for prefix in "$@"; do
