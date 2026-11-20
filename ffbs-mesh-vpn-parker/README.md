@@ -75,8 +75,14 @@ A client of an active node can still have a lease of another uplink, for example
 The client renews this lease per unicast through the mesh, and the other uplink stays its IPv4 router.
 If that uplink fails, the client has no IPv4, although its own node is healthy.
 Thus an active node drops the DHCPv4 requests of its clients into the mesh (chain `PARKER_DHCP`, `/lib/gluon/ebtables/402-parker-dhcp-renew`).
-The client then sends its request as a broadcast (after 87.5 % of the lease time) or a new DHCPDISCOVER (at the end of the lease), and the node answers.
+After 87.5 % of the lease time, the client sends its request as a broadcast.
+dnsmasq is not authoritative (`/lib/gluon/upgrade/905-dhcp-not-authoritative`), so it does not answer a request for a lease that it did not give.
+An authoritative dnsmasq answers with a DHCPACK for the same address, but with the router address of this node.
+Some clients (Android 11) then lose their IPv4 default route until they connect again.
+At the end of the lease, the client sends a DHCPDISCOVER and gets a new lease from its own node.
 Thus the client changes to its own node after at most 2 minutes. Until then, it uses the other uplink.
+The node does not change an address for this. Thus no two nodes use the same address at the same time.
+`tests/dhcp-authoritative-test.sh` tests the answers of dnsmasq with and without authoritative.
 `tests/dhcp-renew-test.sh` (in the package directory) tests the chain with the kernel bridge (see the script for the command).
 
 The code is in `/usr/share/lua/parker/dhcpnak.lua`.
