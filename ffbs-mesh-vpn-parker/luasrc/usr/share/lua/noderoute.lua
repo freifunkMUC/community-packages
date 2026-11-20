@@ -325,6 +325,7 @@ local function apply_network(conf, target_state, address4, mtu)
 
 	if target_state == true then
 		dhcpnak.stop()
+		ragoodbye.cancel()
 		util.log("network: routing state: active")
 		local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
 		-- Offset 1 is our own address and the last one is the broadcast
@@ -381,8 +382,8 @@ local function apply_network(conf, target_state, address4, mtu)
 
 		if uci.get("network", DHCP_IFACE, "proto") == "static" then
 			nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
-			-- Before gw_mode client: the mesh nodes only pass on the RAs
-			-- of their selected gateway.
+			-- Router lifetime 0 only when a new router is there, see
+			-- parker/ragoodbye.lua.
 			ragoodbye.send()
 		end
 		uci_set("network", DHCP_IFACE, "proto", "dhcp")

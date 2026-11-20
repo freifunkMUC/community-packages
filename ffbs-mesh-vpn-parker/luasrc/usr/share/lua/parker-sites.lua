@@ -89,8 +89,9 @@ local T = {
 	-- ignore lifetimes below 180 s (accept_ra_min_lft). uradvd sets the
 	-- PREF64 lifetime to 3 x max interval, rounded down to 8 s: 176 s.
 	-- A state change does not wait for the interval: SIGHUP sends RAs at once.
-	-- A node that stops routing sends router lifetime 0 (noderoute). The
-	-- lifetime only counts when the node stops without that (power loss).
+	-- A node that stops routing sends router lifetime 0 when a new router is
+	-- there (parker/ragoodbye.lua). Else, and at a power loss, this lifetime
+	-- counts.
 	-- 180 s is the lowest value Android accepts; with RAs at most 60 s
 	-- apart, the clients can lose two RAs in a row.
 	ra_lifetime = 180,
