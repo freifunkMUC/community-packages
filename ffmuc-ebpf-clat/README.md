@@ -32,6 +32,35 @@ ffmuc-ebpf-clat 2 2001:db8:ff00:1:: 64:ff9b::
 sudo cat /sys/kernel/debug/tracing/trace_pipe
 ```
 
+## Statistics (respondd)
+
+The eBPF programs count the packets and bytes that they translate, in a per-CPU map.
+Every 10 s the daemon writes the totals of its interface to `/var/run/ebpf-clat/<interface>`.
+The respondd module adds the values of all interfaces together and sends them in `statistics`:
+
+```json
+"clat": {
+  "v4_to_v6": { "packets": 1234, "bytes": 567890 },
+  "v6_to_v4": { "packets": 2345, "bytes": 1234567 }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `statistics.clat.v4_to_v6.packets` | IPv4 packets from the clients, sent as IPv6 (egress) |
+| `statistics.clat.v4_to_v6.bytes` | Size of these packets as IPv4 (header and payload) |
+| `statistics.clat.v6_to_v4.packets` | IPv6 packets, given to the clients as IPv4 (ingress) |
+| `statistics.clat.v6_to_v4.bytes` | Size of these packets as IPv4 (header and payload) |
+
+- Only translated packets count. Packets that the CLAT passes or drops do not count.
+- The counters start at 0 when the daemon starts. The values can be up to 10 s old.
+- A node without a running CLAT (no 464XLAT) sends no `clat` key.
+
+## Tests
+
+- `tests/run.sh`: unit test of the stats files.
+- `tests/e2e.sh`: builds the package and runs the CLAT on a TUN device. Needs root (privileged container).
+
 ## Dependencies
 
 - `libbpf`: BPF library for userspace programs

@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ffmuc-ebpf-clat
 PKG_VERSION:=1
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=LGPL-2.1 OR BSD-2-Clause
 
 include $(TOPDIR)/../package/gluon.mk
@@ -10,7 +10,7 @@ include $(TOPDIR)/../package/gluon.mk
 # TODO: Update Depends
 define Package/$(PKG_NAME)
   TITLE:=eBPF-based CLAT binary (NAT46)
-  DEPENDS:=+libbpf +kmod-sched-core
+  DEPENDS:=+libbpf +kmod-sched-core +respondd +libjson-c
   EXTRA_DEPENDS:=kmod-sched-bpf
 endef
 

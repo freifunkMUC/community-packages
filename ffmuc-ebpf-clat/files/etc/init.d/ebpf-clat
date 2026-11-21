@@ -41,6 +41,10 @@ start_service() {
 		return 1
 	fi
 
+	# Remove stats files of instances that did not stop cleanly. The
+	# running instances write their file again in the next 10 s.
+	rm -f /var/run/ebpf-clat/*
+
 	ifaces=$(wg show all public-key | cut -f1)
 
 	for iface in $ifaces; do
