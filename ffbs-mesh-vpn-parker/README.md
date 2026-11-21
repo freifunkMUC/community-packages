@@ -250,6 +250,8 @@ When the config service sends `sites` and `primary_site`, the
 * After 3 missed pings, it moves the tunnel to the next pgw of the same
   site. It then tells the config service, so that the old pgw removes its
   route to the node.
+* Carry: while the pgw sends much traffic, a missed ping is not counted
+  (see below).
 * When all pgws of a site fail, the site is down. When the primary site
   is down, the next site that is up becomes active.
 * It sends one router advertisement (RA) for the prefixes of all sites
@@ -280,6 +282,26 @@ service uses it only when that site has capacity. To remove it, use
 
 Multi-site operation needs `ip-full` and a uradvd that supports
 `--state-file`.
+
+### Carry
+
+On a lossy or bloated uplink (for example LTE during a big download), the
+ping reply can come late or get lost, although the pgw works. Carry
+prevents a false switch:
+
+* The tunnel carries when the received bytes (rx) of the current pgw grew
+  by 48 KB or more in the last 3 s, in at least 2 of the 3 s. WireGuard
+  counts rx only for authenticated packets. Sent bytes (tx) are not used.
+* While a tunnel of a site that is up carries, a missed ping is not
+  counted. The ping waits up to 3 s, and a late reply counts as an answer.
+* After 30 s without an answer, misses count again.
+* Carry never makes a pgw or site up. Without traffic, nothing changes.
+
+`status` shows `carry=` and `carried=` (number of misses not counted) for
+each site. The values are in `uci parker.sites`: `carry_bytes` (49152,
+0 disables carry), `carry_window` (3), `carry_ticks` (2), `carry_max` (30),
+`probe_wait_busy` (3). `lua5.1 tests/carry-test.lua` (in the package
+directory) tests the rule.
 
 Config service
 --------------
