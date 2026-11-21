@@ -21,6 +21,9 @@
 --     10 s of dwell time.
 --   * More than 3 changes in 10 min: the site stays down for a penalty of
 --     60 s. The penalty doubles each time, up to 600 s.
+--   * Carry (parker/carry.lua): while rx of the current pgw grows by 48 KB
+--     in 3 s, a missed probe of a site that is up is not counted, for at
+--     most 30 s after the last answer. The probe then waits up to 3 s.
 --   * The active site is the primary site while it is up, else the first
 --     site that is up.
 --
@@ -49,6 +52,7 @@
 local json = require("jsonc")
 local posix = require("posix")
 local util = require("util")
+local carry = require("parker.carry")
 
 local TMPDIR = "/tmp/ff-Ohb0ba0u"
 local CONF = TMPDIR .. "/noderoute.json"
@@ -98,6 +102,9 @@ local T = {
 	ra_min_interval = 20,
 	ra_max_interval = 60,
 }
+for k, v in pairs(carry.defaults) do
+	T[k] = v
+end
 
 util.loggername = "parker-sites"
 
@@ -203,28 +210,63 @@ local function is_link(iface)
 	return iface ~= nil and util.read_file("/sys/class/net/" .. iface .. "/ifindex") ~= nil
 end
 
--- Probe all tunnels at the same time and read the handshakes. Takes 1 s.
--- Returns ok[iface] = true and wg[iface] = { peer, ts }.
-local function probe_all(targets)
+local function answer_file(iface)
+	return STATE .. "/answer." .. iface
+end
+
+-- Probe all tunnels at the same time and read the handshakes and the rx
+-- counters. Takes 1 s.
+-- A tunnel in busy (carry) gets a probe that waits probe_wait_busy seconds
+-- in the background and writes seq to its answer file. A reply within the
+-- tick is ok, a reply of an earlier probe is late.
+-- Returns ok[iface] = true, wg[iface] = { peer, ts }, rx[iface] = { peer, rx }
+-- and late[iface] = true.
+local function probe_all(targets, busy, seq, seen)
 	local parts = { "sleep 1 &" }
 	for iface, addr in pairs(targets) do
-		table.insert(parts, "(ping -c 1 -W 1 -I " .. iface .. " " .. addr
-			.. " >/dev/null 2>&1 && echo ok " .. iface .. ") &")
+		if busy[iface] then
+			local f = answer_file(iface)
+			table.insert(parts, "( (ping -c 1 -W " .. T.probe_wait_busy .. " -I " .. iface .. " " .. addr
+				.. " && echo " .. seq .. " >" .. f .. ".tmp && mv " .. f .. ".tmp " .. f
+				.. ") </dev/null >/dev/null 2>&1 & ) ;")
+		else
+			table.insert(parts, "(ping -c 1 -W 1 -I " .. iface .. " " .. addr
+				.. " >/dev/null 2>&1 && echo ok " .. iface .. ") &")
+		end
 	end
-	table.insert(parts, "wg show all latest-handshakes; wait")
-	local ok, wg = {}, {}
+	table.insert(parts, "wg show all latest-handshakes; wg show all transfer; wait")
+	local ok, wg, rx, late = {}, {}, {}, {}
 	for line in output(table.concat(parts, " ")):gmatch("[^\n]+") do
 		local i = line:match("^ok (%S+)$")
 		if i then
 			ok[i] = true
 		else
-			local w, peer, ts = line:match("^(%S+)%s+(%S+)%s+(%d+)$")
-			if w and not wg[w] then
-				wg[w] = { peer = peer, ts = tonumber(ts) }
+			local w, peer, a = line:match("^(%S+)%s+(%S+)%s+(%d+)%s+%d+$")
+			if w then
+				if not rx[w] then
+					rx[w] = { peer = peer, rx = tonumber(a) }
+				end
+			else
+				local ts
+				w, peer, ts = line:match("^(%S+)%s+(%S+)%s+(%d+)$")
+				if w and not wg[w] then
+					wg[w] = { peer = peer, ts = tonumber(ts) }
+				end
 			end
 		end
 	end
-	return ok, wg
+	for iface in pairs(targets) do
+		local got = tonumber((util.read_file(answer_file(iface)) or ""):match("%d+"))
+		if got and got > (seen[iface] or 0) then
+			seen[iface] = got
+			if busy[iface] and got == seq then
+				ok[iface] = true
+			else
+				late[iface] = true
+			end
+		end
+	end
+	return ok, wg, rx, late
 end
 
 local function urlencode(v)
@@ -309,15 +351,21 @@ end
 
 -- One step of the health state machine of a site. st is changed in place.
 -- ok: the probe of this tick answered. wg: { peer, ts } of the tunnel.
-local function health(name, site, iface, st, now, ok, wg)
+-- rx: { peer, rx } of the tunnel. late: a late reply of an earlier probe.
+local function health(name, site, iface, st, now, ok, wg, rx, late)
 	local pgws = site.pgws or {}
 	local current = wg and wg.peer
 	local pgw = current and find_by(pgws, "pubkey", current)
 	local fresh = wg ~= nil and wg.ts > 0 and now - wg.ts < T.handshake_max_age
-	if ok then
+	st.carry = st.carry or carry.new()
+	carry.sample(st.carry, rx and rx.peer, rx and rx.rx, T)
+	local verdict = carry.judge(st.carry, T, now, ok, late, st.state == "up")
+	if verdict == "hit" then
 		st.hits, st.misses = st.hits + 1, 0
-	else
+	elseif verdict == "miss" then
 		st.hits, st.misses = 0, st.misses + 1
+	else
+		st.carried = (st.carried or 0) + 1
 	end
 	local good = st.hits >= T.hits_up and fresh
 	if good then
@@ -738,14 +786,24 @@ local function tick(db)
 		end
 	end
 
-	local ok, wg = probe_all(targets)
+	local busy = {}
+	for _, name in ipairs(names) do
+		local st, i_name = db.sites[name], iface[name]
+		if i_name and targets[i_name] and st.state == "up" and st.carry and carry.active(st.carry, T) then
+			busy[i_name] = true
+		end
+	end
+	db.seq = (db.seq or 0) + 1
+	db.seen = db.seen or {}
+	local ok, wg, rx, late = probe_all(targets, busy, db.seq, db.seen)
 	local now = os.time()
 	local changed = raw ~= db.raw or now - (db.full or 0) >= T.full_every
 	for _, name in ipairs(names) do
 		local st = db.sites[name]
 		local before = st.state .. (st.pgw or "")
 		if iface[name] then
-			health(name, conf.sites[name], iface[name], st, now, ok[iface[name]], wg[iface[name]])
+			local i_name = iface[name]
+			health(name, conf.sites[name], i_name, st, now, ok[i_name], wg[i_name], rx[i_name], late[i_name])
 		elseif st.state == "up" then
 			st.state, st.since = "down", now
 			log("site " .. name .. " is down (no tunnel)")
@@ -809,6 +867,8 @@ local function tick(db)
 			.. " pgw=" .. tostring(st.pgw) .. " hits=" .. st.hits .. " misses=" .. st.misses
 			.. " tried=" .. st.tried .. " fresh=" .. tostring(st.fresh)
 			.. " penalty=" .. tostring(st.penalty_until > now)
+			.. " carry=" .. tostring(st.carry ~= nil and carry.active(st.carry, T))
+			.. " carried=" .. (st.carried or 0)
 			.. " report=" .. (st.report and "pending" or "none")
 			.. " range6=" .. conf.sites[name].range6
 			.. " ra=" .. (ra_state:find(conf.sites[name].range6 .. ",", 1, true) and "on" or "off"))
@@ -827,6 +887,12 @@ else
 	load_tuning()
 	local db = json.parse(util.read_file(STATE .. "/state.json") or "") or {}
 	db.raw, db.full = nil, nil
+	-- The rx history and the probe sequence do not survive a restart.
+	db.seq, db.seen = 0, {}
+	for _, st in pairs(db.sites or {}) do
+		st.carry = nil
+	end
+	os.execute("rm -f " .. STATE .. "/answer.*")
 	while true do
 		local okay, err = pcall(tick, db)
 		if not okay then
