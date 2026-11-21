@@ -60,6 +60,15 @@ check("dead pgw under load: switch 4 s after rx stops",
 check("dead pgw, rx stops late: switch within 6 s",
 	(run(60, { ok = after(20), rate = function(now) return now < 25 and 1000000 or 0 end }) or 99) <= 20 + 6 + 3)
 
+-- pgw stops during a download: the data in flight comes 1 s later, then
+-- retransmits trickle in. The trickle ticks do not count: switch at 24.
+check("drain and trickle after a cut do not carry", run(60, {
+	ok = after(20), rate = function(now)
+		if now < 20 then return 600000 elseif now == 20 then return 300000 end
+		return 12000
+	end,
+}) == 24)
+
 -- Trickle below 48 KB in 3 s: no carry.
 check("trickle does not carry", run(60, { ok = after(20), rate = always(15000) }) == 22)
 

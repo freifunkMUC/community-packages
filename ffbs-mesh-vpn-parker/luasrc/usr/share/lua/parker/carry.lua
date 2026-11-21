@@ -8,8 +8,10 @@
 -- WireGuard counts the received bytes (rx) of a peer only for packets that
 -- it authenticated. When rx of the current pgw grows, this pgw sends. A
 -- tunnel "carries" when rx grew by at least carry_bytes in the last
--- carry_window ticks, and in at least carry_ticks of these ticks. TX proves
--- nothing and is not used.
+-- carry_window ticks, and by at least carry_bytes / carry_window in at least
+-- carry_ticks of these ticks. Thus a short burst (for example the data in
+-- flight when the pgw stops) or a trickle of retransmits does not carry.
+-- TX proves nothing and is not used.
 --
 -- While a tunnel of a site that is up carries, a missed probe is not
 -- counted as a miss (and not as a hit). The probe then waits up to
@@ -57,10 +59,10 @@ function carry.active(c, T)
 	if (T.carry_bytes or 0) <= 0 or #c.deltas < T.carry_window then
 		return false
 	end
-	local sum, ticks = 0, 0
+	local sum, ticks, min = 0, 0, T.carry_bytes / T.carry_window
 	for _, d in ipairs(c.deltas) do
 		sum = sum + d
-		if d > 0 then
+		if d >= min then
 			ticks = ticks + 1
 		end
 	end

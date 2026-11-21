@@ -290,7 +290,8 @@ ping reply can come late or get lost, although the pgw works. Carry
 prevents a false switch:
 
 * The tunnel carries when the received bytes (rx) of the current pgw grew
-  by 48 KB or more in the last 3 s, in at least 2 of the 3 s. WireGuard
+  by 48 KB or more in the last 3 s, and by 16 KB or more in at least 2 of
+  the 3 s. WireGuard
   counts rx only for authenticated packets. Sent bytes (tx) are not used.
 * While a tunnel of a site that is up carries, a missed ping is not
   counted. The ping waits up to 3 s, and a late reply counts as an answer.
