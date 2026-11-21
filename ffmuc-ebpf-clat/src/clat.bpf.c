@@ -17,11 +17,30 @@
 #include <bpf/bpf_tracing.h>
 
 #include "clat.bpf.h"
+#include "clat_stats.h"
 
 /* This implements the CLAT component for 464XLAT, based on RFC6145. */
 
 struct in6_addr CLAT_PREFIX;
 struct in6_addr PLAT_PREFIX;
+
+/* Translation counters, see clat_stats.h. A per-CPU array needs no atomic
+ * operations; the daemon adds the values of all CPUs together. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CLAT_STATS_MAX);
+	__type(key, __u32);
+	__type(value, struct clat_stats);
+} clat_stats SEC(".maps");
+
+/* bytes is the size of the IPv4 packet (IPv4 header and payload). */
+static __always_inline void count_translated(__u32 dir, __u32 bytes) {
+	struct clat_stats *st = bpf_map_lookup_elem(&clat_stats, &dir);
+	if (st) {
+		st->packets++;
+		st->bytes += bytes;
+	}
+}
 
 char _license[] SEC("license") = "GPL";
 
@@ -318,6 +337,7 @@ int clat_egress_4to6(struct __sk_buff *skb) {
 
 	/* Build IPv6 header. */
 	__be16 ip_id = ip->id;
+	__u16 ip_tot_len = bpf_ntohs(ip->tot_len);
 	struct ipv6hdr ip6_new = {
 		.version = 6,
 		.priority = ip->tos >> 4,
@@ -399,6 +419,7 @@ int clat_egress_4to6(struct __sk_buff *skb) {
 		return TC_ACT_SHOT;
 	}
 
+	count_translated(CLAT_STATS_4TO6, ip_tot_len);
 	DEBUG_PRINT("Translated egress packet");
 	return TC_ACT_OK;
 }
@@ -944,6 +965,7 @@ int clat_ingress_6to4(struct __sk_buff *skb) {
 		return TC_ACT_SHOT;
 	}
 
+	count_translated(CLAT_STATS_6TO4, bpf_ntohs(ip_new.tot_len));
 	DEBUG_PRINT("Translated ingress packet");
 	return TC_ACT_OK;
 }

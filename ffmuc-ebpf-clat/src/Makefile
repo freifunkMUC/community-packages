@@ -62,12 +62,12 @@ ifeq ($(IS_CLANG_NEW_ENOUGH),0) # 0 equals "false"
 endif
 
 .PHONY: all
-all: $(APPS)
+all: $(APPS) respondd.so
 
 .PHONY: clean
 clean:
 	$(call msg,CLEAN)
-	$(Q)rm -rf $(OUTPUT) $(APPS)
+	$(Q)rm -rf $(OUTPUT) $(APPS) respondd.so
 
 $(OUTPUT):
 	$(call msg,MKDIR,$@)
@@ -102,12 +102,18 @@ $(OUTPUT)/%.o: %.c $(wildcard %.h) | $(OUTPUT)
 			-o $@
 
 # Build application binary
-$(APPS): %: $(OUTPUT)/%.o | $(OUTPUT)
+$(APPS): %: $(OUTPUT)/%.o $(OUTPUT)/statsfile.o | $(OUTPUT)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CLAT_CFLAGS) $^ \
 			$(CLAT_LDFLAGS) \
 			-lelf -lbpf -lz \
 			-o $@
+
+# respondd module, see README.md
+respondd.so: respondd.c statsfile.c statsfile.h clat_stats.h
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(CLAT_CFLAGS) $(CLAT_INCLUDES) -fPIC -shared $(CLAT_LDFLAGS) \
+			-o $@ respondd.c statsfile.c -ljson-c
 
 # delete failed targets
 .DELETE_ON_ERROR:
