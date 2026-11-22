@@ -85,6 +85,25 @@ check('range4: base off a /20 boundary stays', limits.range4('10.80.100.0/22', R
 check('range4: invalid stays', limits.range4('nonsense', RAM256, true) == 'nonsense')
 check('range4: nil stays', limits.range4(nil, RAM256, true) == nil)
 
+-- Lease file after event mode goes off: /20 -> /22, max 3.
+local leases = table.concat({
+	'100 02:00:00:00:00:01 10.73.0.10 a *',
+	'400 02:00:00:00:00:02 10.73.11.12 b *',
+	'300 02:00:00:00:00:03 10.73.3.254 c *',
+	'200 02:00:00:00:00:04 10.73.1.1 d *',
+	'duid 00:01:02',
+	'500 1234 2001:db8::5 e *',
+}, '\n') .. '\n'
+local trimmed, dropped = limits.trim_leases(leases, '10.73.0.0/22', 3)
+check('trim: 2 leases removed', dropped == 2)
+check('trim: outside /22 removed', not trimmed:find('10.73.11.12', 1, true))
+check('trim: oldest removed', not trimmed:find('10.73.0.10', 1, true))
+check('trim: newer leases and duid stay', trimmed:find('10.73.3.254', 1, true) and trimmed:find('10.73.1.1', 1, true)
+	and trimmed:find('duid', 1, true) and trimmed:find('2001:db8::5', 1, true))
+check('trim: fits, no change', select(2, limits.trim_leases(leases, '10.73.0.0/20', 5)) == 0)
+check('trim: no range, count only', select(2, limits.trim_leases(leases, nil, 1)) == 4)
+check('trim: empty file', limits.trim_leases('', '10.73.0.0/22', 3) == '')
+
 if failed > 0 then
 	print(failed .. ' FAILED')
 	os.exit(1)

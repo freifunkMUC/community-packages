@@ -174,4 +174,71 @@ function M.range4(range4, mem, setting)
 	return string.format('%s.%s.%s.%s/%d', a, b, c, d, M.EVENT_PREFIX)
 end
 
+-- The dhcp-lease-max of dnsmasq when the option is not set.
+M.DNSMASQ_LEASE_MAX = 1000
+
+local function ip4_num(s)
+	local a, b, c, d = string.match(s or '', '^(%d+)%.(%d+)%.(%d+)%.(%d+)$')
+	if a == nil then
+		return nil
+	end
+	return ((tonumber(a) * 256 + tonumber(b)) * 256 + tonumber(c)) * 256 + tonumber(d)
+end
+
+-- Make a dnsmasq lease file fit a smaller pool. dnsmasq counts each stored
+-- lease (IPv4 and IPv6) against dhcp-lease-max and does not start when there
+-- are more ("too many stored leases"). This happens when event mode goes off
+-- with more than 1024 clients. Removes the IPv4 leases outside range4 (nil:
+-- keep all), then the leases with the oldest expiry time until at most max
+-- leases stay. Other lines stay. Returns the new text and the number of
+-- removed leases.
+function M.trim_leases(text, range4, max)
+	local net, mask
+	if range4 ~= nil then
+		local base, len = string.match(range4, '^([%d%.]+)/(%d+)$')
+		net = ip4_num(base)
+		mask = net and 2 ^ (32 - tonumber(len))
+		if net then
+			net = net - net % mask
+		end
+	end
+	local lines, leases = {}, {}
+	for line in string.gmatch(text or '', '[^\n]+') do
+		local expiry, addr = string.match(line, '^(%d+) %S+ (%S+) ')
+		local keep = true
+		if expiry ~= nil then
+			local n = ip4_num(addr)
+			if n ~= nil and net ~= nil and (n < net or n >= net + mask) then
+				keep = false
+			elseif n ~= nil or string.find(addr, ':', 1, true) then
+				table.insert(leases, { idx = #lines + 1, expiry = tonumber(expiry) })
+			end
+		end
+		table.insert(lines, keep and line or false)
+	end
+	if #leases > max then
+		table.sort(leases, function(x, y)
+			if x.expiry ~= y.expiry then
+				return x.expiry > y.expiry
+			end
+			return x.idx < y.idx
+		end)
+		for i = max + 1, #leases do
+			lines[leases[i].idx] = false
+		end
+	end
+	local out, dropped = {}, 0
+	for _, line in ipairs(lines) do
+		if line then
+			table.insert(out, line)
+		else
+			dropped = dropped + 1
+		end
+	end
+	if #out == 0 then
+		return '', dropped
+	end
+	return table.concat(out, '\n') .. '\n', dropped
+end
+
 return M

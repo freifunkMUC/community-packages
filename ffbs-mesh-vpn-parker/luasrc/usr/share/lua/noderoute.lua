@@ -284,8 +284,9 @@ end
 local function apply_dnsmasq_limits(conf, target_state)
 	-- The dnsmasq options of the default and the event mode, see
 	-- parker/limits.lua. A node that does not route uses the dnsmasq
-	-- defaults. Returns whether dnsmasq has to be restarted: it does not
-	-- read these options again on a reload.
+	-- defaults. Returns whether dnsmasq has to be restarted (it does not
+	-- read these options again on a reload), and the client range and
+	-- lease limit for restart_dnsmasq().
 	local dnsmasq = dnsmasq_section()
 	if dnsmasq == nil then
 		return false
@@ -315,7 +316,28 @@ local function apply_dnsmasq_limits(conf, target_state)
 	if changed then
 		uci_commit("dhcp")
 	end
-	return changed
+	local range4 = target_state and conf.range4 or nil
+	return changed, range4, want.dhcpleasemax or limits.DNSMASQ_LEASE_MAX
+end
+
+local function restart_dnsmasq(range4, lease_max)
+	-- dnsmasq does not start when its lease file has more leases than
+	-- dhcp-lease-max, for example after event mode goes off with more
+	-- than 1024 clients. Then DHCP and DNS stop for all clients. So remove
+	-- the leases outside the client range and the oldest ones while
+	-- dnsmasq is stopped. The removed clients get a NAK and a new lease.
+	os.execute("/etc/init.d/dnsmasq stop")
+	local dnsmasq = dnsmasq_section()
+	local file = dnsmasq and uci.get("dhcp", dnsmasq, "leasefile") or "/tmp/dhcp.leases"
+	local text = util.read_file(file)
+	if text ~= nil then
+		local trimmed, dropped = limits.trim_leases(text, range4, lease_max)
+		if dropped > 0 then
+			util.write_file(file, trimmed)
+			util.log("Removed " .. dropped .. " DHCP leases that do not fit " .. tostring(range4) .. " / " .. lease_max)
+		end
+	end
+	os.execute("/etc/init.d/dnsmasq start")
 end
 
 local function sections_changed()
@@ -516,16 +538,16 @@ local function apply_network(conf, target_state, address4, mtu)
 		dhcpnak.start(nak_cidr)
 	end
 
-	local dnsmasq_limits_changed = apply_dnsmasq_limits(conf, target_state)
+	local dnsmasq_limits_changed, lease_range4, lease_max = apply_dnsmasq_limits(conf, target_state)
 
 	if first_time_active_since_boot then
 		util.log("First run since boot. Restarting dnsmasq to generate a valid config")
-		os.execute("/etc/init.d/dnsmasq restart")
+		restart_dnsmasq(lease_range4, lease_max)
 		changed = true
 	elseif dnsmasq_limits_changed then
 		-- dnsmasq keeps its leases in the lease file over a restart.
 		util.log("Restarting dnsmasq for the new client limits")
-		os.execute("/etc/init.d/dnsmasq restart")
+		restart_dnsmasq(lease_range4, lease_max)
 		changed = true
 	end
 
