@@ -2,6 +2,7 @@ local clientaddr = require("clientaddr")
 local dhcp = require("parker.dhcp")
 local dhcpnak = require("parker.dhcpnak")
 local json = require("jsonc")
+local limits = require("parker.limits")
 local ragoodbye = require("parker.ragoodbye")
 local stat = require("posix.sys.stat")
 local util = require("util")
@@ -255,9 +256,6 @@ local function set_client_option(name, values)
 	return true
 end
 
--- The dnsmasq default for dhcp-lease-max.
-local DNSMASQ_LEASE_MAX = 1000
-
 local function dnsmasq_section()
 	local name = nil
 	uci.foreach("dhcp", "dnsmasq", function(s)
@@ -265,6 +263,59 @@ local function dnsmasq_section()
 		return false
 	end)
 	return name
+end
+
+local function event_mode()
+	-- The uci setting. parker/limits.lua ignores it on a node with too
+	-- little RAM.
+	-- Log the warning only once, not in each cycle.
+	local setting = limits.enabled(uci.get("parker", "event_mode", "enabled"))
+	local blocked = setting and not limits.available(limits.mem_total())
+	local flag = "/tmp/parker_event_mode_blocked"
+	if blocked and util.read_file(flag) == nil then
+		util.log("WARNING: event mode is set, but this node has too little RAM. Using the default limits.")
+		util.write_file(flag, "1\n")
+	elseif not blocked and util.read_file(flag) ~= nil then
+		os.remove(flag)
+	end
+	return setting
+end
+
+local function apply_dnsmasq_limits(conf, target_state)
+	-- The dnsmasq options of the default and the event mode, see
+	-- parker/limits.lua. A node that does not route uses the dnsmasq
+	-- defaults. Returns whether dnsmasq has to be restarted: it does not
+	-- read these options again on a reload.
+	local dnsmasq = dnsmasq_section()
+	if dnsmasq == nil then
+		return false
+	end
+	local want = {}
+	if target_state then
+		local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
+		local pool = math.floor(2 ^ (32 - prefix_len)) - 3
+		want = limits.dnsmasq(limits.mem_total(), event_mode(), pool)
+	end
+	local changed = false
+	for _, option in ipairs(limits.DNSMASQ_OPTIONS) do
+		local value = want[option]
+		if value ~= nil then
+			value = string.format("%d", value)
+		end
+		if uci.get("dhcp", dnsmasq, option) ~= value then
+			if value ~= nil then
+				uci_set("dhcp", dnsmasq, option, value)
+			else
+				uci_delete("dhcp", dnsmasq, option)
+			end
+			util.log("dnsmasq " .. option .. ": " .. tostring(value))
+			changed = true
+		end
+	end
+	if changed then
+		uci_commit("dhcp")
+	end
+	return changed
 end
 
 local function sections_changed()
@@ -365,15 +416,6 @@ local function apply_network(conf, target_state, address4, mtu)
 		uci_set("dhcp", DHCP_IFACE, "force", "1")
 		util.log("Configuring DHCPD on " .. DHCP_IFACE .. " with up to " .. limit .. " leases")
 
-		-- dnsmasq gives out no more than dhcp-lease-max leases. Gluon does
-		-- not set it, so a pool larger than the dnsmasq default is not
-		-- usable completely.
-		local dnsmasq = dnsmasq_section()
-		if dnsmasq ~= nil then
-			local pool = 2 ^ (32 - prefix_len) - 3
-			uci_set("dhcp", dnsmasq, "dhcpleasemax", math.max(pool, DNSMASQ_LEASE_MAX))
-		end
-
 		uci_set("network", DHCP_IFACE, "proto", "static")
 		uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
 		util.log(DHCP_IFACE .. " ipaddr: " .. address4 .. "/" .. prefix_len)
@@ -414,11 +456,6 @@ local function apply_network(conf, target_state, address4, mtu)
 		uci_delete("network", DHCP_IFACE, "ip6addr")
 		uci_delete("network", DHCP_IFACE, "xlat_range6")
 		uci_set("network", "client6", "proto", "dhcpv6")
-
-		local dnsmasq = dnsmasq_section()
-		if dnsmasq ~= nil and uci.get("dhcp", dnsmasq, "dhcpleasemax") ~= nil then
-			uci_delete("dhcp", dnsmasq, "dhcpleasemax")
-		end
 
 		uci_set("network", "gluon_bat0", "gw_mode", "client")
 
@@ -479,8 +516,15 @@ local function apply_network(conf, target_state, address4, mtu)
 		dhcpnak.start(nak_cidr)
 	end
 
+	local dnsmasq_limits_changed = apply_dnsmasq_limits(conf, target_state)
+
 	if first_time_active_since_boot then
 		util.log("First run since boot. Restarting dnsmasq to generate a valid config")
+		os.execute("/etc/init.d/dnsmasq restart")
+		changed = true
+	elseif dnsmasq_limits_changed then
+		-- dnsmasq keeps its leases in the lease file over a restart.
+		util.log("Restarting dnsmasq for the new client limits")
 		os.execute("/etc/init.d/dnsmasq restart")
 		changed = true
 	end
@@ -639,6 +683,12 @@ local function update(report)
 		util.log("UCI is dirty. Refusing to reconfigure node.")
 		report:write("dirty")
 		return
+	end
+
+	local event = event_mode()
+	if limits.apply_sysctl(event) then
+		local active = limits.active(limits.mem_total(), event)
+		util.log("Applied the client limits to the kernel (event mode: " .. tostring(active) .. ")")
 	end
 
 	local active = {}

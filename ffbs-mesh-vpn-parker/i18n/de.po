@@ -1,0 +1,22 @@
+msgid ""
+msgstr ""
+"Language: de\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "Enable event mode"
+msgstr "Event-Modus aktivieren"
+
+msgid "Event mode"
+msgstr "Event-Modus"
+
+msgid "ffbs-mesh-vpn-parker:event-mode:description"
+msgstr ""
+"Verwende den Event-Modus nur für große Veranstaltungen mit mehr als "
+"1000 Clients in einem Mesh, zum Beispiel ein Festival. Der Knoten braucht mindestens 128 MB RAM. Der Uplink-Knoten "
+"vergibt dann alle Adressen seines Pools und verwendet größere Tabellen. "
+"Das braucht mehr Speicher. Ohne Event-Modus vergibt der Knoten höchstens "
+"1024 Adressen. Die Änderung gilt nach ungefähr 30 Sekunden und braucht "
+"keinen Neustart."
+
+msgid "ffbs-mesh-vpn-parker:event-mode:no-ram"
+msgstr "Dieser Knoten hat weniger als 128 MB RAM. Er kann den Event-Modus nicht verwenden."

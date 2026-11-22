@@ -162,32 +162,52 @@ default route in table 1 (IPv6 first), for example `wwan0`.
 cannot read the MTU, it sends 1280. `nodeconfig.lua` and `status` use the
 same device.
 
-Neighbour table
----------------
+Client limits and event mode
+----------------------------
 
-The uplink node routes for all clients of its mesh. Each IPv6 client has
-2 to 3 addresses. The kernel default limit (`gc_thresh3` = 1024) is full
-at approximately 400 clients. Then the kernel drops packets
-("neighbour table overflow").
+An uplink node routes for all clients of its mesh. By default it serves
+up to 1024 clients. For a large event (more than 1000 clients in one
+mesh, for example a festival), the node owner sets the event mode.
+The node must have 128 MB RAM or more. On a smaller node, config mode
+does not show the option, and `noderoute` ignores the uci setting, logs
+a warning and uses the default limits.
 
-The upgrade script `260-parker-neigh-limits` writes
-`/etc/sysctl.d/41-parker-neigh.conf`. The limits apply to IPv4 and IPv6
-and scale with the RAM:
+- In config mode: "Event mode" page, "Enable event mode".
+- On the command line:
+  `uci set parker.event_mode.enabled=1; uci commit parker`.
 
-| RAM            | gc_thresh1 | gc_thresh2 | gc_thresh3 |
-|----------------|-----------:|-----------:|-----------:|
-| up to 64 MiB   |        512 |       2048 |       4096 |
-| up to 128 MiB  |       1024 |       4096 |       8192 |
-| more           |       2048 |       8192 |      16384 |
+`noderoute` applies the change within approximately 30 seconds. It does
+not reboot the node. When the DHCP settings change, it restarts dnsmasq.
+The clients keep their leases.
 
-DHCPv4 lease limit
-------------------
+| Setting                      | Default             | Event mode                   |
+|------------------------------|---------------------|------------------------------|
+| DHCPv4 leases (`dhcpleasemax`) | 1024              | full pool, e.g. 4093 for /20 |
+| dnsmasq ping check           | on                  | off (`noping`)               |
+| DNS cache (`cachesize`)      | dnsmasq default 150 | 4096 (256 MB), 2048 (128 MB) |
+| `gc_thresh1/2/3` IPv4, IPv6  | 1024 / 2048 / 4096  | 2048 / 8192 / 16384 (256 MB), 1024 / 4096 / 8192 (128 MB) |
+| `nf_conntrack_max`           | 16384 (128 MB and more) | 65536 (256 MB), 32768 (128 MB) |
 
-dnsmasq gives out no more than `dhcp-lease-max` leases (default 1000).
-Gluon does not set it. When the node routes, `noderoute` sets
-`dhcpleasemax` to the pool size of `range4` (at least 1000), for example
-4093 for a /20. When the node stops routing, `noderoute` removes the
-option again.
+The RAM classes come from `MemTotal`: 256 MB (more than 192 MiB) and
+128 MB (more than 96 MiB). The node never sets `nf_conntrack_max` lower
+than the kernel value. A node that does not route uses the dnsmasq
+defaults.
+
+Reasons, from lab tests with up to 4000 clients:
+
+- Each IPv6 client has 2 to 3 addresses. The kernel default
+  (`gc_thresh3` = 1024) is full at approximately 400 clients. Then the
+  kernel drops packets ("neighbour table overflow").
+- A festival traffic mix uses approximately 10 conntrack entries for
+  each client. The kernel value (approximately 15000 with 256 MiB RAM)
+  is full at approximately 1000 to 1200 clients.
+- dnsmasq waits up to 3 s for each ping of a new address and stops all
+  DHCP in that time. When many clients join, the DHCP socket overflows
+  and renewals get lost. With 4000 clients, only 83 % of the renewals
+  got an answer. Without the ping check, all renewals got an answer.
+
+The file `/etc/sysctl.d/41-parker-limits.conf` holds the kernel values.
+The code is in `parker/limits.lua`.
 
 Client addresses
 ----------------
