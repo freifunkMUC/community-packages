@@ -249,7 +249,9 @@ When the config service sends `sites` and `primary_site`, the
 * It monitors the gateway (pgw) of each site with one ping each second.
 * After 3 missed pings, it moves the tunnel to the next pgw of the same
   site. It then tells the config service, so that the old pgw removes its
-  route to the node.
+  route to the node (see "Switch report" below).
+* A ping that the node cannot send (for example during a firewall reload)
+  is not counted for 60 s. Another pgw does not help then.
 * Carry: while the pgw sends much traffic, a missed ping is not counted
   (see below).
 * When all pgws of a site fail, the site is down. When the primary site
@@ -352,9 +354,32 @@ Fields of each entry in `sites`:
 | `concentrator` | The `id` of the tunnel in `concentrators` that goes to this site. |
 | `pgws`         | List of the gateways of the site: `name`, `pubkey`, `endpoint`, `address6`. |
 
-When `parker-sites` moves a tunnel to another pgw, it reports the change:
+### Switch report
+
+The config service selects the pgw of each site. When `parker-sites` moves
+a tunnel to another pgw, it reports the change after the first handshake
+with the new pgw:
 
     GET http://<config_server>/api/v3/switch?pubkey=<wg pubkey>&site=<name>&pgw=<pgw name>
+
+* 2xx: the config service knows the switch. When the answer contains
+  `"pgw"`, it must be the reported pgw.
+* 409, 5xx or no answer: the node sends the report again after 3 s, 6 s,
+  12 s, ... (at most 60 s).
+* Other 4xx: the node does not send the report again.
+
+Until the config service knows the switch, a fetched config can still name
+the pgw that the node left. Thus the node does not go back to that pgw:
+
+* While the switch is not confirmed (at most 1800 s), or for 300 s after
+  the switch, a config that names the left pgw gets the new pgw.
+* A config that names another pgw (rebalance, drain) is applied as it is.
+* The record is in `/tmp/parker-sites/switch.<site>`. After a reboot, the
+  node uses the pgw that the config service gives.
+
+Tuning (`uci parker.sites.<option>`): `switch_hold` (300),
+`switch_guard_max` (1800), `report_retry` (3), `report_retry_max` (60),
+`send_error_max` (60).
 
 site.conf
 ---------
