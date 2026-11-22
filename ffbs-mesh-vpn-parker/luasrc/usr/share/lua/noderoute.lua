@@ -310,9 +310,7 @@ local function apply_dnsmasq_limits(conf, target_state)
 	end
 	local want = {}
 	if target_state then
-		local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
-		local pool = math.floor(2 ^ (32 - prefix_len)) - 3
-		want = limits.dnsmasq(limits.mem_total(), event_mode(), pool)
+		want = limits.dnsmasq(limits.mem_total(), event_mode(), limits.pool(conf.range4))
 	end
 	local changed = false
 	for _, option in ipairs(limits.DNSMASQ_OPTIONS) do
@@ -434,7 +432,7 @@ local function apply_network(conf, target_state, address4, mtu)
 		-- address, so the pool runs from offset 2 to the one before the
 		-- broadcast address.
 		local start = 2
-		local limit = (2 ^ (32 - prefix_len) - 3)
+		local limit = limits.pool(conf.range4)
 		local prefix6_len = tonumber(util.str_split(conf.range6, "[^/]+")[2])
 
 		if address4 ~= conf.address4 then

@@ -104,6 +104,10 @@ check('trim: fits, no change', select(2, limits.trim_leases(leases, '10.73.0.0/2
 check('trim: no range, count only', select(2, limits.trim_leases(leases, nil, 1)) == 4)
 check('trim: empty file', limits.trim_leases('', '10.73.0.0/22', 3) == '')
 
+check('pool: /22', limits.pool('10.80.96.0/22') == 1021)
+check('pool: /20', limits.pool('10.80.96.0/20') == 4093)
+check('pool: invalid', limits.pool('nonsense') == nil and limits.pool(nil) == nil)
+
 if failed > 0 then
 	print(failed .. ' FAILED')
 	os.exit(1)

@@ -144,7 +144,7 @@ function M.dnsmasq(mem, setting, pool)
 		return { dhcpleasemax = M.DEFAULT_CLIENTS }
 	end
 	return {
-		dhcpleasemax = math.max(pool, M.DEFAULT_CLIENTS),
+		dhcpleasemax = math.max(pool or 0, M.DEFAULT_CLIENTS),
 		-- dnsmasq waits up to 3 s for each ping and stops all DHCP in that
 		-- time. With many new clients, the DHCP socket overflows and
 		-- renewals get lost.
@@ -172,6 +172,16 @@ function M.range4(range4, mem, setting)
 		return range4
 	end
 	return string.format('%s.%s.%s.%s/%d', a, b, c, d, M.EVENT_PREFIX)
+end
+
+-- Number of DHCP addresses in range4: all addresses without the network,
+-- node and broadcast address. nil if range4 is not valid.
+function M.pool(range4)
+	local len = tonumber(string.match(range4 or '', '^%d+%.%d+%.%d+%.%d+/(%d+)$'))
+	if len == nil or len > 30 then
+		return nil
+	end
+	return math.floor(2 ^ (32 - len)) - 3
 end
 
 -- The dhcp-lease-max of dnsmasq when the option is not set.
