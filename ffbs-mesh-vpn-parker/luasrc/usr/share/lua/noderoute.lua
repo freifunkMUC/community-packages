@@ -227,6 +227,18 @@ local function set_client_option(name, values)
 	return true
 end
 
+-- The dnsmasq default for dhcp-lease-max.
+local DNSMASQ_LEASE_MAX = 1000
+
+local function dnsmasq_section()
+	local name = nil
+	uci.foreach("dhcp", "dnsmasq", function(s)
+		name = s[".name"]
+		return false
+	end)
+	return name
+end
+
 local function sections_changed()
 	return not empty(uci.changes("dhcp")) or not empty(uci.changes("network"))
 end
@@ -297,6 +309,15 @@ local function apply_network(conf, target_state, mtu)
 		uci_set("dhcp", DHCP_IFACE, "force", "1")
 		util.log("Configuring DHCPD on " .. DHCP_IFACE .. " with up to " .. limit .. " leases")
 
+		-- dnsmasq gives out no more than dhcp-lease-max leases. Gluon does
+		-- not set it, so a pool larger than the dnsmasq default is not
+		-- usable completely.
+		local dnsmasq = dnsmasq_section()
+		if dnsmasq ~= nil then
+			local pool = 2 ^ (32 - prefix_len) - 3
+			uci_set("dhcp", dnsmasq, "dhcpleasemax", math.max(pool, DNSMASQ_LEASE_MAX))
+		end
+
 		uci_set("network", DHCP_IFACE, "proto", "static")
 		uci_set("network", DHCP_IFACE, "ipaddr", conf.address4 .. "/" .. prefix_len)
 		util.log(DHCP_IFACE .. " ipaddr: " .. conf.address4 .. "/" .. prefix_len)
@@ -326,6 +347,11 @@ local function apply_network(conf, target_state, mtu)
 		uci_delete("network", DHCP_IFACE, "ip6addr")
 		uci_delete("network", DHCP_IFACE, "xlat_range6")
 		uci_set("network", "client6", "proto", "dhcpv6")
+
+		local dnsmasq = dnsmasq_section()
+		if dnsmasq ~= nil and uci.get("dhcp", dnsmasq, "dhcpleasemax") ~= nil then
+			uci_delete("dhcp", dnsmasq, "dhcpleasemax")
+		end
 
 		uci_set("network", "gluon_bat0", "gw_mode", "client")
 
