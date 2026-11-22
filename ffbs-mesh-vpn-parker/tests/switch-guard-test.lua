@@ -1,5 +1,6 @@
 -- Test of the pgw switch guard and the switch report (parker/switchguard.lua
--- and guard_config(), report_result() and health() in parker-sites.lua).
+-- and guard_config(), report_result(), health() and next_hop() in
+-- parker-sites.lua).
 -- luacheck: globals loadstring
 -- Run: lua5.1 tests/switch-guard-test.lua (from the package directory).
 
@@ -54,7 +55,7 @@ local src = f:read("*a")
 f:close()
 local cut = assert(src:find('\nif arg[1] == "guard" then', 1, true))
 local ps = assert(load_chunk(src:sub(1, cut)
-	.. "return { guard = guard_config, result = report_result, health = health, T = T }"))()
+	.. "return { guard = guard_config, result = report_result, health = health, T = T, next_hop = next_hop }"))()
 local sg = require("parker.switchguard")
 local json = require("jsonc")
 local T = ps.T
@@ -236,5 +237,12 @@ for t = 0, 2 do
 	ps.health("vie01", s, "wg_c3", st, now, false, { peer = "K4", ts = 2990 }, nil, false, true)
 end
 check("senderr: switch after send_error_max", json.parse(fs[STATE .. "/switch.vie01"] or "{}").to, "pgw05")
+
+-- Default routes: via the pgw that the tunnel uses now, not a device route.
+check("next_hop: current pgw", ps.next_hop(config(P3), "vie01", { pgw = "pgw04" }), "via fe80::4 ")
+check("next_hop: no state, config pgw", ps.next_hop(config(P3), "vie01", nil), "via fe80::3 ")
+check("next_hop: unknown pgw, config pgw", ps.next_hop(config(P3), "vie01", { pgw = "?" }), "via fe80::3 ")
+check("next_hop: no address6, device route",
+	ps.next_hop(config({ pubkey = "K9", endpoint = "x" }), "vie01", { pgw = "?" }), "")
 
 os.exit(failed == 0 and 0 or 1)

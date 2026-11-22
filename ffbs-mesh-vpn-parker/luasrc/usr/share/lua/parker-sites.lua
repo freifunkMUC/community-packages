@@ -30,7 +30,7 @@
 -- When a state changes, and every 10 s, the daemon applies:
 --   * the address of each site on br-client and as /128 on its tunnel,
 --   * source rules: "from <site /64>" and, after them, "to <site DNS64>
---     iif lo" use the table of the site (default dev wg_cX),
+--     iif lo" use the table of the site (default via the pgw on wg_cX),
 --   * the IPv6 and IPv4 default routes on the tunnel of the active site
 --     (the IPv4 route selects the CLAT of that tunnel),
 --   * ip6tables chain parker_src for packets out of wg_c+: a source from a
@@ -625,6 +625,16 @@ local function apply_dns(file)
 	sh("/etc/init.d/dnsmasq restart")
 end
 
+-- "via <pgw link-local> " for the default routes of a site: the pgw that its
+-- tunnel uses now, else the pgw of the config. wg_cX is NOARP: a route
+-- without a gateway makes each destination a neighbour entry.
+local function next_hop(conf, name, st)
+	local site = conf.sites[name]
+	local pgw = find_by(site.pgws or {}, "name", st and st.pgw)
+		or find_by(conf.concentrators or {}, "id", site.concentrator)
+	return (pgw and pgw.address6) and ("via " .. pgw.address6 .. " ") or ""
+end
+
 -- Addresses, rules, firewall, routes, CLAT, RA and DNS for the current state.
 local function apply(conf, names, db, iface, tbl, up, active, now)
 	-- Clients skip the main table: netifd puts an unreachable route on the
@@ -649,8 +659,8 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 					sh("ip -6 route replace " .. pgw.address6 .. "/128 dev " .. iface[name])
 				end
 			end
-			sh("ip -6 route replace default dev " .. iface[name] .. " src " .. site.address6
-				.. " table " .. tbl[name])
+			sh("ip -6 route replace default " .. next_hop(conf, name, db.sites[name]) .. "dev " .. iface[name]
+				.. " src " .. site.address6 .. " table " .. tbl[name])
 			table.insert(rules, "pref " .. (RULE_MIN + 100 + i) .. " from " .. site.range6
 				.. " lookup " .. tbl[name])
 			-- After the source rules: a packet with a site source must use
@@ -667,8 +677,9 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 	-- Default routes on the tunnel of the active site. Keep the MTU and the
 	-- record of noderoute, so that noderoute takes the route as its own.
 	if active and iface[active] then
-		sh("ip -6 route replace default dev " .. iface[active] .. " proto 23")
-		sh("ip -6 route replace default dev " .. iface[active] .. " proto 23 table 23")
+		local via = next_hop(conf, active, db.sites[active])
+		sh("ip -6 route replace default " .. via .. "dev " .. iface[active] .. " proto 23")
+		sh("ip -6 route replace default " .. via .. "dev " .. iface[active] .. " proto 23 table 23")
 		local conc = find_by(conf.concentrators, "id", conf.sites[active].concentrator)
 		local route4 = util.read_file(ROUTE4_FILE)
 		if conc and conc.address4 and route4 and not route4:find("dev " .. iface[active] .. " ", 1, true) then
@@ -791,8 +802,9 @@ local function cleanup(db, conf)
 	sh("rm -rf " .. STATE)
 end
 
--- The statistics for ffbs-parker-respondd. The default routes are device
--- routes, so respondd cannot read the pgw from them.
+-- The statistics for ffbs-parker-respondd. The default routes name only
+-- the link-local address of the pgw, so respondd cannot read the pgw from
+-- them.
 --   * gateway, gateway6, gateway_nexthop: the pgw and tunnel of the active
 --     site. gateway is the pgw address6, as gateway6, so that yanic can
 --     link it to the pgw node. Only without address6 it is "name (site)".

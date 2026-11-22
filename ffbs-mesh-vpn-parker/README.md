@@ -262,6 +262,10 @@ When the config service sends `sites` and `primary_site`, the
   The active prefix is the last prefix option in the RA, because macOS
   and iOS put the CLAT46 address on the last prefix.
 * It routes each client source address to the tunnel of its own site.
+  The IPv6 default routes go through the link-local address of the
+  current pgw of the site (`default via fe80::... dev wg_cX`). The
+  tunnels are NOARP: a route without a gateway makes one neighbour entry
+  for each destination.
 
 Without `sites` in the config, the service does nothing, and the node
 operates with one site as before. The status is in
