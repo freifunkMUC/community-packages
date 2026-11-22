@@ -12,7 +12,7 @@ package.preload["util"] = function() return {} end
 local f = assert(io.open("luasrc/usr/share/lua/parker-sites.lua"))
 local src = f:read("*a")
 f:close()
-local cut = assert(src:find('\nif arg[1] == "pin" then', 1, true))
+local cut = assert(src:find('\nif arg[1] == "guard" then', 1, true))
 local load_chunk = loadstring or load
 local respondd_json = assert(load_chunk(src:sub(1, cut) .. "return respondd_json"))()
 

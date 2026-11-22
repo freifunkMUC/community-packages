@@ -131,8 +131,8 @@ while true; do
 	tail -n 1 "${tmpdir}response" >> "${tmpdir}config.json.sig"
 
 	if usign -V -m "${tmpdir}config.json" -p $SIGN_PUB_KEY -q ; then
-		# Multi-site: keep the pgw that parker-sites uses for each site.
-		lua /usr/share/lua/parker-sites.lua pin "${tmpdir}config.json"
+		# Multi-site: after a recent pgw switch, do not go back to the left pgw.
+		lua /usr/share/lua/parker-sites.lua guard "${tmpdir}config.json"
 		if outp=$(lua /usr/share/lua/nodeconfig.lua "${tmpdir}config.json" "$nonce" "$tmpdir") ; then
 			echo "$outp"
 			slp=$(echo "$outp" | tail -n1)

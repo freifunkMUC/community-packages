@@ -30,7 +30,7 @@
 -- When a state changes, and every 10 s, the daemon applies:
 --   * the address of each site on br-client and as /128 on its tunnel,
 --   * source rules: "from <site /64>" and, after them, "to <site DNS64>
---     iif lo" use the table of the site (default dev wg_cX),
+--     iif lo" use the table of the site (default via the pgw on wg_cX),
 --   * the IPv6 and IPv4 default routes on the tunnel of the active site
 --     (the IPv4 route selects the CLAT of that tunnel),
 --   * ip6tables chain parker_src for packets out of wg_c+: a source from a
@@ -45,14 +45,19 @@
 -- removes the extra site addresses from br-client. The tick then adds them
 -- again and counts path_broken.
 --
--- "lua parker-sites.lua pin <config.json>" (from nodeconfig.sh) writes the
--- pgw in use into each fetched config, so that a new config does not undo a
--- pgw switch.
+-- The config service selects the pgw of each site. "lua parker-sites.lua
+-- guard <config.json>" (from nodeconfig.sh) changes a fetched config only
+-- shortly after a pgw switch, so that it does not move the tunnel back to
+-- the pgw that the node left (parker/switchguard.lua).
+--
+-- A probe that cannot be sent (local error, for example during a firewall
+-- reload) is not counted for at most send_error_max seconds: another pgw does not help.
 
 local json = require("jsonc")
 local posix = require("posix")
 local util = require("util")
 local carry = require("parker.carry")
+local switchguard = require("parker.switchguard")
 
 local TMPDIR = "/tmp/ff-Ohb0ba0u"
 local CONF = TMPDIR .. "/noderoute.json"
@@ -79,7 +84,7 @@ local T = {
 	penalty = 60,
 	penalty_max = 600,
 	full_every = 10,
-	report_retry = 3,
+	send_error_max = 60,
 	-- Same as ra_lifetime: a client must not keep a preferred address of a
 	-- node after the route through that node has ended. The other nodes
 	-- drop traffic from a source address that is not theirs.
@@ -103,6 +108,9 @@ local T = {
 	ra_max_interval = 60,
 }
 for k, v in pairs(carry.defaults) do
+	T[k] = v
+end
+for k, v in pairs(switchguard.defaults) do
 	T[k] = v
 end
 
@@ -179,26 +187,35 @@ local function load_tuning()
 	end
 end
 
--- pin <config.json>: write the pgw in use into the concentrator of each site.
-local function pin(path)
+local function switch_file(name)
+	return STATE .. "/switch." .. name
+end
+
+local function read_switch(name)
+	local rec = json.parse(util.read_file(switch_file(name)) or "")
+	return type(rec) == "table" and rec or nil
+end
+
+-- guard <config.json>: after a recent pgw switch, a config that names the
+-- left pgw gets the new pgw (see parker/switchguard.lua).
+local function guard_config(path)
 	local conf = json.parse(util.read_file(path) or "")
 	if not is_multisite(conf) then
 		return
 	end
 	local changed = false
 	for name, site in pairs(conf.sites) do
-		local pinned = util.read_file(STATE .. "/pgw." .. name)
-		local pgw = pinned and find_by(site.pgws, "name", pinned)
-		local conc = find_by(conf.concentrators, "id", site.concentrator)
-		if pgw and conc and conc.pubkey ~= pgw.pubkey then
-			for _, k in ipairs({ "address4", "address6", "endpoint", "pubkey" }) do
-				if pgw[k] ~= nil then
-					conc[k] = pgw[k]
-				end
+		local rec = read_switch(name)
+		if rec then
+			local conc = find_by(conf.concentrators, "id", site.concentrator)
+			local action = switchguard.decide(rec, site, conc, os.time(), T)
+			if action == "keep" then
+				switchguard.use(conc, find_by(site.pgws, "name", rec.to))
+				changed = true
+				log("site " .. name .. ": config names pgw " .. rec.from .. ", keep pgw " .. rec.to)
+			elseif action == "expire" then
+				os.remove(switch_file(name))
 			end
-			changed = true
-		elseif pinned and not pgw then
-			os.remove(STATE .. "/pgw." .. name)
 		end
 	end
 	if changed then
@@ -219,8 +236,9 @@ end
 -- A tunnel in busy (carry) gets a probe that waits probe_wait_busy seconds
 -- in the background and writes seq to its answer file. A reply within the
 -- tick is ok, a reply of an earlier probe is late.
--- Returns ok[iface] = true, wg[iface] = { peer, ts }, rx[iface] = { peer, rx }
--- and late[iface] = true.
+-- A probe that the node cannot send (sendto error) sets senderr[iface].
+-- Returns ok[iface] = true, wg[iface] = { peer, ts }, rx[iface] = { peer, rx },
+-- late[iface] = true and senderr[iface] = true.
 local function probe_all(targets, busy, seq, seen)
 	local parts = { "sleep 1 &" }
 	for iface, addr in pairs(targets) do
@@ -230,16 +248,20 @@ local function probe_all(targets, busy, seq, seen)
 				.. " && echo " .. seq .. " >" .. f .. ".tmp && mv " .. f .. ".tmp " .. f
 				.. ") </dev/null >/dev/null 2>&1 & ) ;")
 		else
-			table.insert(parts, "(ping -c 1 -W 1 -I " .. iface .. " " .. addr
-				.. " >/dev/null 2>&1 && echo ok " .. iface .. ") &")
+			table.insert(parts, "(o=$(ping -c 1 -W 1 -I " .. iface .. " " .. addr
+				.. " 2>&1) && echo ok " .. iface .. " || case \"$o\" in *sendto*) echo senderr "
+				.. iface .. ";; esac) &")
 		end
 	end
 	table.insert(parts, "wg show all latest-handshakes; wg show all transfer; wait")
-	local ok, wg, rx, late = {}, {}, {}, {}
+	local ok, wg, rx, late, senderr = {}, {}, {}, {}, {}
 	for line in output(table.concat(parts, " ")):gmatch("[^\n]+") do
 		local i = line:match("^ok (%S+)$")
+		local e = line:match("^senderr (%S+)$")
 		if i then
 			ok[i] = true
+		elseif e then
+			senderr[e] = true
 		else
 			local w, peer, a = line:match("^(%S+)%s+(%S+)%s+(%d+)%s+%d+$")
 			if w then
@@ -266,7 +288,7 @@ local function probe_all(targets, busy, seq, seen)
 			end
 		end
 	end
-	return ok, wg, rx, late
+	return ok, wg, rx, late, senderr
 end
 
 local function urlencode(v)
@@ -275,9 +297,14 @@ local function urlencode(v)
 	end))
 end
 
+local function report_file(name)
+	return STATE .. "/report." .. name
+end
+
 -- Tell the config service that the site now uses pgw (in the background).
 -- As nodeconfig.sh: out over the WAN (packet mark 1), and the name resolves
--- through the WAN resolver.
+-- through the WAN resolver. The result goes to report.<site>: the line
+-- "rc <exit code>", then the answer and the messages of wget.
 local function report_switch(name, iface, pgw)
 	local server = output("uci -q get parker.nodeconfig.config_server"):match("%S+")
 	local key = output("wg show " .. iface .. " public-key"):match("%S+")
@@ -286,9 +313,33 @@ local function report_switch(name, iface, pgw)
 	end
 	local url = "http://" .. server .. SWITCH_PATH .. "?pubkey=" .. urlencode(key)
 		.. "&site=" .. urlencode(name) .. "&pgw=" .. urlencode(pgw)
-	local done = STATE .. "/report." .. name
-	os.execute("(LIBPACKETMARK_MARK=1 LD_PRELOAD=libpacketmark.so gluon-wan-dns wget -q -T 3"
-		.. " -O /dev/null '" .. url .. "' && echo " .. pgw .. " > " .. done .. ") >/dev/null 2>&1 &")
+	local f = report_file(name)
+	os.remove(f)
+	os.execute("(LIBPACKETMARK_MARK=1 LD_PRELOAD=libpacketmark.so gluon-wan-dns wget -T 3"
+		.. " -O " .. f .. ".body '" .. url .. "' 2>" .. f .. ".err; echo rc $? >" .. f .. ".tmp;"
+		.. " cat " .. f .. ".body " .. f .. ".err >>" .. f .. ".tmp; rm -f " .. f .. ".body " .. f .. ".err;"
+		.. " mv " .. f .. ".tmp " .. f .. ") </dev/null >/dev/null 2>&1 &")
+end
+
+-- The result of the last report: "confirmed", "retry", "rejected" (do not
+-- retry) or nil (no result yet). The config service answers 2xx with the
+-- pgw that it uses, 4xx other than 409 when the report is wrong.
+local function report_result(name, pgw)
+	local r = util.read_file(report_file(name))
+	local rc = r and tonumber(r:match("^rc (%d+)"))
+	if not rc then
+		return nil
+	end
+	if rc == 0 then
+		local chosen = switchguard.chosen(r)
+		return (chosen == nil or chosen == pgw) and "confirmed" or "retry", r
+	end
+	-- uclient-fetch: "HTTP error 409", busybox wget: "HTTP/1.1 409 Conflict".
+	local code = tonumber(r:match("HTTP error (%d%d%d)") or r:match("HTTP/%S+ (%d%d%d)"))
+	if code and code >= 400 and code < 500 and code ~= 409 then
+		return "rejected", r
+	end
+	return "retry", r
 end
 
 -- The pgw names resolve only through the WAN resolver. Thus resolve them
@@ -300,7 +351,7 @@ local function resolve(endpoint)
 end
 
 -- Move the tunnel of a site to another pgw. The prefix stays as it is.
-local function switch_pgw(name, iface, pgw)
+local function switch_pgw(name, iface, pgw, from)
 	local ep = resolve(pgw.endpoint)
 	if not ep then
 		log("site " .. name .. ": cannot resolve " .. pgw.endpoint)
@@ -314,8 +365,10 @@ local function switch_pgw(name, iface, pgw)
 		log("site " .. name .. ": wg set failed for " .. pgw.name)
 		return false
 	end
-	util.write_file(STATE .. "/pgw." .. name, pgw.name)
-	pin(CONF)
+	util.write_file(switch_file(name), json.stringify({
+		from = from and from.name, to = pgw.name, since = os.time(),
+	}))
+	guard_config(CONF)
 	log("site " .. name .. ": " .. iface .. " now uses pgw " .. pgw.name)
 	return true
 end
@@ -352,19 +405,31 @@ end
 -- One step of the health state machine of a site. st is changed in place.
 -- ok: the probe of this tick answered. wg: { peer, ts } of the tunnel.
 -- rx: { peer, rx } of the tunnel. late: a late reply of an earlier probe.
-local function health(name, site, iface, st, now, ok, wg, rx, late)
+local function health(name, site, iface, st, now, ok, wg, rx, late, senderr)
 	local pgws = site.pgws or {}
 	local current = wg and wg.peer
 	local pgw = current and find_by(pgws, "pubkey", current)
 	local fresh = wg ~= nil and wg.ts > 0 and now - wg.ts < T.handshake_max_age
 	st.carry = st.carry or carry.new()
 	carry.sample(st.carry, rx and rx.peer, rx and rx.rx, T)
-	local verdict = carry.judge(st.carry, T, now, ok, late, st.state == "up")
+	-- A probe that the node cannot send says nothing about the pgw. Another
+	-- pgw does not help, thus do not count it for send_error_max seconds.
+	local verdict
+	if senderr and not ok then
+		st.senderr_since = st.senderr_since or now
+		if now - st.senderr_since < T.send_error_max then
+			verdict = "senderr"
+			st.senderrs = (st.senderrs or 0) + 1
+		end
+	else
+		st.senderr_since = nil
+	end
+	verdict = verdict or carry.judge(st.carry, T, now, ok, late, st.state == "up")
 	if verdict == "hit" then
 		st.hits, st.misses = st.hits + 1, 0
 	elseif verdict == "miss" then
 		st.hits, st.misses = 0, st.misses + 1
-	else
+	elseif verdict == "carry" then
 		st.carried = (st.carried or 0) + 1
 	end
 	local good = st.hits >= T.hits_up and fresh
@@ -380,24 +445,40 @@ local function health(name, site, iface, st, now, ok, wg, rx, late)
 		if #pgws > 1 then
 			local _, i = find_by(pgws, "pubkey", current or "")
 			local next_pgw = pgws[((i or 0) % #pgws) + 1]
-			if switch_pgw(name, iface, next_pgw) then
+			if switch_pgw(name, iface, next_pgw, pgw) then
 				pgw = next_pgw
 				st.switched = true
-				st.report = { pgw = next_pgw.name, since = now, last = 0 }
-				os.remove(STATE .. "/report." .. name)
+				st.report = { pgw = next_pgw.name, since = now, next = 0, n = 0 }
+				os.remove(report_file(name))
 			end
 		end
 	end
 
-	-- Report the switch after a handshake with the new pgw.
+	-- Report the switch after a handshake with the new pgw. Send it again
+	-- with backoff until the config service confirms it.
 	if st.report then
-		if (util.read_file(STATE .. "/report." .. name) or ""):match("%S+") == st.report.pgw then
+		local result, text = report_result(name, st.report.pgw)
+		local rec = read_switch(name)
+		if result == "confirmed" then
 			log("site " .. name .. ": config service knows pgw " .. st.report.pgw .. " ("
-				.. (now - st.report.since) .. " s)")
+				.. (now - st.report.since) .. " s, " .. st.report.n .. " reports)")
+			if rec and rec.to == st.report.pgw then
+				rec.confirmed = os.time()
+				util.write_file(switch_file(name), json.stringify(rec))
+			end
+			st.report = nil
+		elseif result == "rejected" then
+			log("site " .. name .. ": config service rejects pgw " .. st.report.pgw .. ": "
+				.. (text or ""):gsub("%s+", " "))
+			st.report = nil
+		elseif not rec or rec.to ~= st.report.pgw or now - st.report.since >= T.switch_guard_max then
+			log("site " .. name .. ": stop the report of pgw " .. st.report.pgw)
 			st.report = nil
 		elseif wg and pgw and pgw.name == st.report.pgw and wg.ts >= st.report.since
-				and now - st.report.last >= T.report_retry then
-			st.report.last = now
+				and now >= st.report.next
+				and (result or st.report.n == 0 or now >= st.report.next + T.report_retry_max) then
+			st.report.n = st.report.n + 1
+			st.report.next = now + switchguard.retry_after(st.report.n, T)
 			report_switch(name, iface, st.report.pgw)
 		end
 	end
@@ -544,6 +625,16 @@ local function apply_dns(file)
 	sh("/etc/init.d/dnsmasq restart")
 end
 
+-- "via <pgw link-local> " for the default routes of a site: the pgw that its
+-- tunnel uses now, else the pgw of the config. wg_cX is NOARP: a route
+-- without a gateway makes each destination a neighbour entry.
+local function next_hop(conf, name, st)
+	local site = conf.sites[name]
+	local pgw = find_by(site.pgws or {}, "name", st and st.pgw)
+		or find_by(conf.concentrators or {}, "id", site.concentrator)
+	return (pgw and pgw.address6) and ("via " .. pgw.address6 .. " ") or ""
+end
+
 -- Addresses, rules, firewall, routes, CLAT, RA and DNS for the current state.
 local function apply(conf, names, db, iface, tbl, up, active, now)
 	-- Clients skip the main table: netifd puts an unreachable route on the
@@ -568,8 +659,8 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 					sh("ip -6 route replace " .. pgw.address6 .. "/128 dev " .. iface[name])
 				end
 			end
-			sh("ip -6 route replace default dev " .. iface[name] .. " src " .. site.address6
-				.. " table " .. tbl[name])
+			sh("ip -6 route replace default " .. next_hop(conf, name, db.sites[name]) .. "dev " .. iface[name]
+				.. " src " .. site.address6 .. " table " .. tbl[name])
 			table.insert(rules, "pref " .. (RULE_MIN + 100 + i) .. " from " .. site.range6
 				.. " lookup " .. tbl[name])
 			-- After the source rules: a packet with a site source must use
@@ -586,8 +677,9 @@ local function apply(conf, names, db, iface, tbl, up, active, now)
 	-- Default routes on the tunnel of the active site. Keep the MTU and the
 	-- record of noderoute, so that noderoute takes the route as its own.
 	if active and iface[active] then
-		sh("ip -6 route replace default dev " .. iface[active] .. " proto 23")
-		sh("ip -6 route replace default dev " .. iface[active] .. " proto 23 table 23")
+		local via = next_hop(conf, active, db.sites[active])
+		sh("ip -6 route replace default " .. via .. "dev " .. iface[active] .. " proto 23")
+		sh("ip -6 route replace default " .. via .. "dev " .. iface[active] .. " proto 23 table 23")
 		local conc = find_by(conf.concentrators, "id", conf.sites[active].concentrator)
 		local route4 = util.read_file(ROUTE4_FILE)
 		if conc and conc.address4 and route4 and not route4:find("dev " .. iface[active] .. " ", 1, true) then
@@ -710,8 +802,9 @@ local function cleanup(db, conf)
 	sh("rm -rf " .. STATE)
 end
 
--- The statistics for ffbs-parker-respondd. The default routes are device
--- routes, so respondd cannot read the pgw from them.
+-- The statistics for ffbs-parker-respondd. The default routes name only
+-- the link-local address of the pgw, so respondd cannot read the pgw from
+-- them.
 --   * gateway, gateway6, gateway_nexthop: the pgw and tunnel of the active
 --     site. gateway is the pgw address6, as gateway6, so that yanic can
 --     link it to the pgw node. Only without address6 it is "name (site)".
@@ -795,7 +888,7 @@ local function tick(db)
 	end
 	db.seq = (db.seq or 0) + 1
 	db.seen = db.seen or {}
-	local ok, wg, rx, late = probe_all(targets, busy, db.seq, db.seen)
+	local ok, wg, rx, late, senderr = probe_all(targets, busy, db.seq, db.seen)
 	local now = os.time()
 	local changed = raw ~= db.raw or now - (db.full or 0) >= T.full_every
 	for _, name in ipairs(names) do
@@ -803,7 +896,8 @@ local function tick(db)
 		local before = st.state .. (st.pgw or "")
 		if iface[name] then
 			local i_name = iface[name]
-			health(name, conf.sites[name], i_name, st, now, ok[i_name], wg[i_name], rx[i_name], late[i_name])
+			health(name, conf.sites[name], i_name, st, now, ok[i_name], wg[i_name], rx[i_name], late[i_name],
+				senderr[i_name])
 		elseif st.state == "up" then
 			st.state, st.since = "down", now
 			log("site " .. name .. " is down (no tunnel)")
@@ -869,7 +963,9 @@ local function tick(db)
 			.. " penalty=" .. tostring(st.penalty_until > now)
 			.. " carry=" .. tostring(st.carry ~= nil and carry.active(st.carry, T))
 			.. " carried=" .. (st.carried or 0)
-			.. " report=" .. (st.report and "pending" or "none")
+			.. " senderrs=" .. (st.senderrs or 0)
+			.. " report=" .. (st.report and ("pending/" .. st.report.n) or "none")
+			.. " guard=" .. (read_switch(name) and "on" or "off")
 			.. " range6=" .. conf.sites[name].range6
 			.. " ra=" .. (ra_state:find(conf.sites[name].range6 .. ",", 1, true) and "on" or "off"))
 	end
@@ -878,8 +974,9 @@ local function tick(db)
 	update_file(STATE .. "/respondd.json", respondd_json(conf, names, db, iface, active, now))
 end
 
-if arg[1] == "pin" then
-	pin(arg[2])
+if arg[1] == "guard" then
+	load_tuning()
+	guard_config(arg[2])
 elseif arg[1] == "resolve" then
 	print(util.resolve_endpoint(arg[2], util.prefer_ipv6()) or "")
 else
