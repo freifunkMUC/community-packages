@@ -187,8 +187,8 @@ end
 
 -- Make a dnsmasq lease file fit a smaller pool. dnsmasq counts each stored
 -- lease (IPv4 and IPv6) against dhcp-lease-max and does not start when there
--- are more ("too many stored leases"). This happens when event mode goes off
--- with more than 1024 clients. Removes the IPv4 leases outside range4 (nil:
+-- are more ("too many stored leases"), for example when the client network
+-- gets smaller. Removes the IPv4 leases outside range4 (nil:
 -- keep all), then the leases with the oldest expiry time until at most max
 -- leases stay. Other lines stay. Returns the new text and the number of
 -- removed leases.

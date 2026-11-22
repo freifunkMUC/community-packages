@@ -270,6 +270,23 @@ local function event_mode()
 	-- little RAM.
 	-- Log the warning only once, not in each cycle.
 	local setting = limits.enabled(uci.get("parker", "event_mode", "enabled"))
+	-- Switching the event mode off applies only after a reboot. A live
+	-- switch would make the client network smaller and remove the IPv4
+	-- address of many clients during the event.
+	local on_since_boot = "/tmp/parker_event_mode_on"
+	local off_logged = "/tmp/parker_event_mode_off_logged"
+	if setting then
+		if util.read_file(on_since_boot) == nil then
+			util.write_file(on_since_boot, "1\n")
+		end
+		os.remove(off_logged)
+	elseif util.read_file(on_since_boot) ~= nil then
+		if util.read_file(off_logged) == nil then
+			util.log("Event mode is off in uci. The node keeps the event mode until the next reboot.")
+			util.write_file(off_logged, "1\n")
+		end
+		setting = true
+	end
 	local blocked = setting and not limits.available(limits.mem_total())
 	local flag = "/tmp/parker_event_mode_blocked"
 	if blocked and util.read_file(flag) == nil then
@@ -322,8 +339,8 @@ end
 
 local function restart_dnsmasq(range4, lease_max)
 	-- dnsmasq does not start when its lease file has more leases than
-	-- dhcp-lease-max, for example after event mode goes off with more
-	-- than 1024 clients. Then DHCP and DNS stop for all clients. So remove
+	-- dhcp-lease-max, for example when the config service announces a
+	-- smaller range4. Then DHCP and DNS stop for all clients. So remove
 	-- the leases outside the client range and the oldest ones while
 	-- dnsmasq is stopped. The removed clients get a NAK and a new lease.
 	os.execute("/etc/init.d/dnsmasq stop")
