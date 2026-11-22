@@ -186,7 +186,10 @@ becomes `10.80.96.0/20` (4093 leases). The node address and the existing
 leases stay valid. The client network stays on the node, because the
 CLAT translates the client addresses to IPv6. When the event mode is off
 again, the node uses the announced `range4`. Clients with an address
-outside of it get a new address on their next renewal. A `range4` of /20
+outside of it get a new address on their next renewal. Before dnsmasq
+restarts, the node removes the leases outside of the client network and
+the oldest leases above the limit. If it does not do this, dnsmasq does
+not start. Clients above the limit get no address. A `range4` of /20
 or larger, or a base that is not on a /20 boundary, does not change.
 
 | Setting                      | Default             | Event mode                   |
