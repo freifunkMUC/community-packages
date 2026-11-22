@@ -162,6 +162,65 @@ default route in table 1 (IPv6 first), for example `wwan0`.
 cannot read the MTU, it sends 1280. `nodeconfig.lua` and `status` use the
 same device.
 
+Client limits and event mode
+----------------------------
+
+An uplink node routes for all clients of its mesh. By default it serves
+up to 1024 clients. For a large event (more than 1000 clients in one
+mesh, for example a festival), the node owner sets the event mode.
+The node must have 128 MB RAM or more. On a smaller node, config mode
+does not show the option, and `noderoute` ignores the uci setting, logs
+a warning and uses the default limits.
+
+- In config mode: "Event mode" page, "Enable event mode".
+- On the command line:
+  `uci set parker.event_mode.enabled=1; uci commit parker`.
+
+When the event mode goes on, `noderoute` applies it within
+approximately 30 seconds. It does not reboot the node. It restarts
+dnsmasq, and the clients keep their leases. When the event mode goes
+off, the node keeps the event mode until the next reboot and logs this
+one time. A live switch would remove the IPv4 address of many clients
+during the event.
+
+In event mode, the node makes the client network (`range4`) larger. It
+keeps the base address and uses a /20 mask, for example `10.80.96.0/22`
+becomes `10.80.96.0/20` (4093 leases). The node address and the existing
+leases stay valid. The client network stays on the node, because the
+CLAT translates the client addresses to IPv6. After the reboot without
+event mode, the node uses the announced `range4` again. A `range4` of /20
+or larger, or a base that is not on a /20 boundary, does not change.
+
+| Setting                      | Default             | Event mode                   |
+|------------------------------|---------------------|------------------------------|
+| Client network (`range4`)    | announced, e.g. /22 | same base, /20               |
+| DHCPv4 leases (`dhcpleasemax`) | 1024              | full pool, 4093 for /20      |
+| dnsmasq ping check           | on                  | off (`noping`)               |
+| DNS cache (`cachesize`)      | dnsmasq default 150 | 4096 (256 MB), 2048 (128 MB) |
+| `gc_thresh1/2/3` IPv4, IPv6  | 1024 / 2048 / 4096  | 2048 / 8192 / 16384 (256 MB), 1024 / 4096 / 8192 (128 MB) |
+| `nf_conntrack_max`           | 16384 (128 MB and more) | 65536 (256 MB), 32768 (128 MB) |
+
+The RAM classes come from `MemTotal`: 256 MB (more than 192 MiB) and
+128 MB (more than 96 MiB). The node never sets `nf_conntrack_max` lower
+than the kernel value. A node that does not route uses the dnsmasq
+defaults.
+
+Reasons, from lab tests with up to 4000 clients:
+
+- Each IPv6 client has 2 to 3 addresses. The kernel default
+  (`gc_thresh3` = 1024) is full at approximately 400 clients. Then the
+  kernel drops packets ("neighbour table overflow").
+- A festival traffic mix uses approximately 10 conntrack entries for
+  each client. The kernel value (approximately 15000 with 256 MiB RAM)
+  is full at approximately 1000 to 1200 clients.
+- dnsmasq waits up to 3 s for each ping of a new address and stops all
+  DHCP in that time. When many clients join, the DHCP socket overflows
+  and renewals get lost. With 4000 clients, only 83 % of the renewals
+  got an answer. Without the ping check, all renewals got an answer.
+
+The file `/etc/sysctl.d/41-parker-limits.conf` holds the kernel values.
+The code is in `parker/limits.lua`.
+
 Client addresses
 ----------------
 

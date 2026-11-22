@@ -1,0 +1,20 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "Enable event mode"
+msgstr "Enable event mode"
+
+msgid "Event mode"
+msgstr "Event mode"
+
+msgid "ffbs-mesh-vpn-parker:event-mode:description"
+msgstr ""
+"Use the event mode only for large events with more than 1000 clients "
+"in one mesh, for example a festival. The node must have 128 MB RAM or more. The uplink node then gives out "
+"all addresses of its pool and uses larger tables. This uses more "
+"memory. Without the event mode, the node gives out no more than 1024 "
+"addresses. Switching the event mode on applies in approximately 30 "
+"seconds without a reboot. Switching it off applies only after a reboot."
+
+msgid "ffbs-mesh-vpn-parker:event-mode:no-ram"
+msgstr "This node has less than 128 MB RAM. It cannot use the event mode."

@@ -1,0 +1,18 @@
+#!/usr/bin/lua
+
+-- Client limits of the node: the default and the event mode (see
+-- /usr/share/lua/parker/limits.lua). noderoute applies them again in each
+-- cycle, so a change of the event mode needs no reboot.
+
+local limits = require('parker.limits')
+local uci = require('simple-uci').cursor()
+
+if uci:get('parker', 'event_mode') == nil then
+	uci:section('parker', 'event_mode', 'event_mode', { enabled = false })
+	uci:save('parker')
+end
+
+-- Earlier lab images wrote only the neighbour limits to this file.
+os.remove('/etc/sysctl.d/41-parker-neigh.conf')
+
+limits.apply_sysctl(uci:get_bool('parker', 'event_mode', 'enabled'))

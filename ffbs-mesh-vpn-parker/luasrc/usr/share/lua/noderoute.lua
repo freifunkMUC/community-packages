@@ -2,6 +2,7 @@ local clientaddr = require("clientaddr")
 local dhcp = require("parker.dhcp")
 local dhcpnak = require("parker.dhcpnak")
 local json = require("jsonc")
+local limits = require("parker.limits")
 local ragoodbye = require("parker.ragoodbye")
 local stat = require("posix.sys.stat")
 local util = require("util")
@@ -255,6 +256,105 @@ local function set_client_option(name, values)
 	return true
 end
 
+local function dnsmasq_section()
+	local name = nil
+	uci.foreach("dhcp", "dnsmasq", function(s)
+		name = s[".name"]
+		return false
+	end)
+	return name
+end
+
+local function event_mode()
+	-- The uci setting. parker/limits.lua ignores it on a node with too
+	-- little RAM.
+	-- Log the warning only once, not in each cycle.
+	local setting = limits.enabled(uci.get("parker", "event_mode", "enabled"))
+	-- Switching the event mode off applies only after a reboot. A live
+	-- switch would make the client network smaller and remove the IPv4
+	-- address of many clients during the event.
+	local on_since_boot = "/tmp/parker_event_mode_on"
+	local off_logged = "/tmp/parker_event_mode_off_logged"
+	if setting then
+		if util.read_file(on_since_boot) == nil then
+			util.write_file(on_since_boot, "1\n")
+		end
+		os.remove(off_logged)
+	elseif util.read_file(on_since_boot) ~= nil then
+		if util.read_file(off_logged) == nil then
+			util.log("Event mode is off in uci. The node keeps the event mode until the next reboot.")
+			util.write_file(off_logged, "1\n")
+		end
+		setting = true
+	end
+	local blocked = setting and not limits.available(limits.mem_total())
+	local flag = "/tmp/parker_event_mode_blocked"
+	if blocked and util.read_file(flag) == nil then
+		util.log("WARNING: event mode is set, but this node has too little RAM. Using the default limits.")
+		util.write_file(flag, "1\n")
+	elseif not blocked and util.read_file(flag) ~= nil then
+		os.remove(flag)
+	end
+	return setting
+end
+
+local function apply_dnsmasq_limits(conf, target_state)
+	-- The dnsmasq options of the default and the event mode, see
+	-- parker/limits.lua. A node that does not route uses the dnsmasq
+	-- defaults. Returns whether dnsmasq has to be restarted (it does not
+	-- read these options again on a reload), and the client range and
+	-- lease limit for restart_dnsmasq().
+	local dnsmasq = dnsmasq_section()
+	if dnsmasq == nil then
+		return false
+	end
+	local want = {}
+	if target_state then
+		want = limits.dnsmasq(limits.mem_total(), event_mode(), limits.pool(conf.range4))
+	end
+	local changed = false
+	for _, option in ipairs(limits.DNSMASQ_OPTIONS) do
+		local value = want[option]
+		if value ~= nil then
+			value = string.format("%d", value)
+		end
+		if uci.get("dhcp", dnsmasq, option) ~= value then
+			if value ~= nil then
+				uci_set("dhcp", dnsmasq, option, value)
+			else
+				uci_delete("dhcp", dnsmasq, option)
+			end
+			util.log("dnsmasq " .. option .. ": " .. tostring(value))
+			changed = true
+		end
+	end
+	if changed then
+		uci_commit("dhcp")
+	end
+	local range4 = target_state and conf.range4 or nil
+	return changed, range4, want.dhcpleasemax or limits.DNSMASQ_LEASE_MAX
+end
+
+local function restart_dnsmasq(range4, lease_max)
+	-- dnsmasq does not start when its lease file has more leases than
+	-- dhcp-lease-max, for example when the config service announces a
+	-- smaller range4. Then DHCP and DNS stop for all clients. So remove
+	-- the leases outside the client range and the oldest ones while
+	-- dnsmasq is stopped. The removed clients get a NAK and a new lease.
+	os.execute("/etc/init.d/dnsmasq stop")
+	local dnsmasq = dnsmasq_section()
+	local file = dnsmasq and uci.get("dhcp", dnsmasq, "leasefile") or "/tmp/dhcp.leases"
+	local text = util.read_file(file)
+	if text ~= nil then
+		local trimmed, dropped = limits.trim_leases(text, range4, lease_max)
+		if dropped > 0 then
+			util.write_file(file, trimmed)
+			util.log("Removed " .. dropped .. " DHCP leases that do not fit " .. tostring(range4) .. " / " .. lease_max)
+		end
+	end
+	os.execute("/etc/init.d/dnsmasq start")
+end
+
 local function sections_changed()
 	return not empty(uci.changes("dhcp")) or not empty(uci.changes("network"))
 end
@@ -332,7 +432,7 @@ local function apply_network(conf, target_state, address4, mtu)
 		-- address, so the pool runs from offset 2 to the one before the
 		-- broadcast address.
 		local start = 2
-		local limit = (2 ^ (32 - prefix_len) - 3)
+		local limit = limits.pool(conf.range4)
 		local prefix6_len = tonumber(util.str_split(conf.range6, "[^/]+")[2])
 
 		if address4 ~= conf.address4 then
@@ -453,9 +553,16 @@ local function apply_network(conf, target_state, address4, mtu)
 		dhcpnak.start(nak_cidr)
 	end
 
+	local dnsmasq_limits_changed, lease_range4, lease_max = apply_dnsmasq_limits(conf, target_state)
+
 	if first_time_active_since_boot then
 		util.log("First run since boot. Restarting dnsmasq to generate a valid config")
-		os.execute("/etc/init.d/dnsmasq restart")
+		restart_dnsmasq(lease_range4, lease_max)
+		changed = true
+	elseif dnsmasq_limits_changed then
+		-- dnsmasq keeps its leases in the lease file over a restart.
+		util.log("Restarting dnsmasq for the new client limits")
+		restart_dnsmasq(lease_range4, lease_max)
 		changed = true
 	end
 
@@ -615,6 +722,12 @@ local function update(report)
 		return
 	end
 
+	local event = event_mode()
+	if limits.apply_sysctl(event) then
+		local active = limits.active(limits.mem_total(), event)
+		util.log("Applied the client limits to the kernel (event mode: " .. tostring(active) .. ")")
+	end
+
 	local active = {}
 
 	for _, elem in ipairs(get_handshake_ages()) do
@@ -659,7 +772,15 @@ local function update(report)
 			note = " (client ip " .. address4 .. ")"
 		end
 		util.log(#active .. " active tunnels: Applying network state.")
-		apply_network(conf, true, address4, mtu)
+		-- In event mode the client network is larger than the announced
+		-- range4 (same base, see parker/limits.lua). clientaddr keeps the
+		-- announced range, so a moved address stays valid.
+		local range4 = limits.range4(conf.range4, limits.mem_total(), event)
+		local net_conf = setmetatable({ range4 = range4 }, { __index = conf })
+		if range4 ~= conf.range4 then
+			note = note .. " (event range " .. range4 .. ")"
+		end
+		apply_network(net_conf, true, address4, mtu)
 	end
 
 	local current = get_wg_routes()

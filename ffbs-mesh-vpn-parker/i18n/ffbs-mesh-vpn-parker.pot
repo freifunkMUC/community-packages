@@ -1,0 +1,14 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "Enable event mode"
+msgstr ""
+
+msgid "Event mode"
+msgstr ""
+
+msgid "ffbs-mesh-vpn-parker:event-mode:description"
+msgstr ""
+
+msgid "ffbs-mesh-vpn-parker:event-mode:no-ram"
+msgstr ""
