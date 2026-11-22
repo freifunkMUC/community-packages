@@ -153,4 +153,25 @@ function M.dnsmasq(mem, setting, pool)
 	}
 end
 
+-- The client network (range4) of an uplink node. The config service
+-- announces one range for all nodes, for example a /22. In event mode the
+-- node uses the same base with a /20 mask (4093 DHCPv4 leases). The range
+-- stays on the node: the CLAT translates the client addresses to IPv6, so
+-- no other system routes it. A range that is already /20 or larger, or a
+-- base that is not on a /20 boundary, stays as it is.
+M.EVENT_PREFIX = 20
+
+function M.range4(range4, mem, setting)
+	local a, b, c, d, len = string.match(range4 or '', '^(%d+)%.(%d+)%.(%d+)%.(%d+)/(%d+)$')
+	len = tonumber(len)
+	if len == nil or len <= M.EVENT_PREFIX or not M.active(mem, setting) then
+		return range4
+	end
+	local base = ((tonumber(a) * 256 + tonumber(b)) * 256 + tonumber(c)) * 256 + tonumber(d)
+	if base % 2 ^ (32 - M.EVENT_PREFIX) ~= 0 then
+		return range4
+	end
+	return string.format('%s.%s.%s.%s/%d', a, b, c, d, M.EVENT_PREFIX)
+end
+
 return M

@@ -74,6 +74,17 @@ os.remove(path)
 
 check('enabled', limits.enabled('1') and limits.enabled(true) and not limits.enabled('0') and not limits.enabled(nil))
 
+-- Event mode: same base, /20 mask.
+check('range4: default keeps /22', limits.range4('10.80.96.0/22', RAM256, false) == '10.80.96.0/22')
+check('range4: event widens /22 to /20', limits.range4('10.80.96.0/22', RAM256, true) == '10.80.96.0/20')
+check('range4: event on 128 MB widens', limits.range4('10.80.96.0/22', 123904, true) == '10.80.96.0/20')
+check('range4: no event below 128 MB', limits.range4('10.80.96.0/22', RAM64, true) == '10.80.96.0/22')
+check('range4: /20 stays', limits.range4('10.73.0.0/20', RAM256, true) == '10.73.0.0/20')
+check('range4: /16 is not narrowed', limits.range4('10.80.0.0/16', RAM256, true) == '10.80.0.0/16')
+check('range4: base off a /20 boundary stays', limits.range4('10.80.100.0/22', RAM256, true) == '10.80.100.0/22')
+check('range4: invalid stays', limits.range4('nonsense', RAM256, true) == 'nonsense')
+check('range4: nil stays', limits.range4(nil, RAM256, true) == nil)
+
 if failed > 0 then
 	print(failed .. ' FAILED')
 	os.exit(1)

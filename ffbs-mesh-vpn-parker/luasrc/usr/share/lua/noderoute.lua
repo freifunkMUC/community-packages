@@ -735,7 +735,15 @@ local function update(report)
 			note = " (client ip " .. address4 .. ")"
 		end
 		util.log(#active .. " active tunnels: Applying network state.")
-		apply_network(conf, true, address4, mtu)
+		-- In event mode the client network is larger than the announced
+		-- range4 (same base, see parker/limits.lua). clientaddr keeps the
+		-- announced range, so a moved address stays valid.
+		local range4 = limits.range4(conf.range4, limits.mem_total(), event)
+		local net_conf = setmetatable({ range4 = range4 }, { __index = conf })
+		if range4 ~= conf.range4 then
+			note = note .. " (event range " .. range4 .. ")"
+		end
+		apply_network(net_conf, true, address4, mtu)
 	end
 
 	local current = get_wg_routes()

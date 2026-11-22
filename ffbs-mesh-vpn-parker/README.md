@@ -180,9 +180,19 @@ a warning and uses the default limits.
 not reboot the node. When the DHCP settings change, it restarts dnsmasq.
 The clients keep their leases.
 
+In event mode, the node makes the client network (`range4`) larger. It
+keeps the base address and uses a /20 mask, for example `10.80.96.0/22`
+becomes `10.80.96.0/20` (4093 leases). The node address and the existing
+leases stay valid. The client network stays on the node, because the
+CLAT translates the client addresses to IPv6. When the event mode is off
+again, the node uses the announced `range4`. Clients with an address
+outside of it get a new address on their next renewal. A `range4` of /20
+or larger, or a base that is not on a /20 boundary, does not change.
+
 | Setting                      | Default             | Event mode                   |
 |------------------------------|---------------------|------------------------------|
-| DHCPv4 leases (`dhcpleasemax`) | 1024              | full pool, e.g. 4093 for /20 |
+| Client network (`range4`)    | announced, e.g. /22 | same base, /20               |
+| DHCPv4 leases (`dhcpleasemax`) | 1024              | full pool, 4093 for /20      |
 | dnsmasq ping check           | on                  | off (`noping`)               |
 | DNS cache (`cachesize`)      | dnsmasq default 150 | 4096 (256 MB), 2048 (128 MB) |
 | `gc_thresh1/2/3` IPv4, IPv6  | 1024 / 2048 / 4096  | 2048 / 8192 / 16384 (256 MB), 1024 / 4096 / 8192 (128 MB) |
