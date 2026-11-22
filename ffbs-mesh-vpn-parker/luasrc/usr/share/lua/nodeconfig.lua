@@ -163,6 +163,7 @@ local function apply_wg(conf)
 
 	local current = util.get_wg_info()
 	local target_ifaces = {}
+	local changed = false
 	local allowed_ips = wg_allowed_ips(conf)
 	local ipv6_first = util.prefer_ipv6()
 
@@ -186,6 +187,7 @@ local function apply_wg(conf)
 				util.log("Setting wg-interface " .. iface .. " up")
 				os.execute("ip link set up " .. iface)
 				conf_tc_iface(iface)
+				changed = true
 			elseif conc.resolved_endpoint ~= nil then
 				-- An interface is sized for the endpoint it is about to be
 				-- configured with. While that endpoint is unresolvable we
@@ -202,6 +204,7 @@ local function apply_wg(conf)
 			-- connect to other concentrators from now on.
 			util.log("Removing wg-interface " .. iface)
 			os.execute("ip link del " .. iface)
+			changed = true
 		else
 			-- Update configuration on existing interfaces to what the config
 			-- service has told us to use.
@@ -277,6 +280,7 @@ local function apply_wg(conf)
 					-- The active configuration differs from the received configuration.
 					-- Let's update it.
 					conf_wg_iface(iface, PRIVKEY, { target }, conf.wg_keepalive, allowed_ips)
+					changed = true
 				end
 			else
 				-- Our Wireguard interfaces should always only have one peer.
@@ -296,23 +300,57 @@ local function apply_wg(conf)
 			util.log("Updating IPv4 addr on wg-iface " .. iface)
 			os.execute("ip -4 addr flush dev " .. iface .. " scope global")
 			os.execute("ip -4 addr add " .. conf.address4 .. "/32 peer " .. conc.address4 .. " dev " .. iface)
+			changed = true
 		end
 		-- check ipv6
 		if string.find(state, "inet6 " .. conf.address6 .. " peer " .. conc.address6) == nil then
 			util.log("Updating IPv6 addr on wg-iface " .. iface)
 			os.execute("ip -6 addr flush dev " .. iface .. " scope global")
 			os.execute("ip -6 addr replace " .. conf.address6 .. "/128 peer " .. conc.address6 .. " dev " .. iface)
+			changed = true
 		end
 	end
 
-	-- reload ebpf-clat, but only when it is already running.
-	-- this ensures that clat is also active for any newly added interfaces
-	if util.read_file("/etc/init.d/ebpf-clat") ~= nil then
+	-- Reload ebpf-clat when a tunnel or its address changed, but only when
+	-- it is already running. Thus clat is also active on new interfaces.
+	if changed and util.read_file("/etc/init.d/ebpf-clat") ~= nil then
 		util.log("Reloading ebpf-clat")
 		os.execute("/etc/init.d/ebpf-clat running && /etc/init.d/ebpf-clat reload")
 	end
 
 	return true
+end
+
+-- Keys that change in the answer of the config service without a change
+-- for the node: nonce and time change with each request. The node does not
+-- read "preferred" of a pgw. The tunnel follows the concentrator, which is
+-- compared.
+local VOLATILE = { nonce = true, time = true, preferred = true }
+
+-- Is b equal to a? Tables are compared by value, without the VOLATILE keys.
+local function same_value(a, b)
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return a == b
+	end
+	for k, v in pairs(a) do
+		if not VOLATILE[k] and not same_value(v, b[k]) then
+			return false
+		end
+	end
+	for k in pairs(b) do
+		if not VOLATILE[k] and a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+-- Is the configuration in new_path equal to the one in old_path?
+-- Compare the files, not conf: apply_wg() adds keys to conf.
+local function same_config(old_path, new_path)
+	local old = json.parse(util.read_file(old_path) or "")
+	local new = json.parse(util.read_file(new_path) or "")
+	return type(old) == "table" and type(new) == "table" and same_value(new, old)
 end
 
 local function apply_time(conf)
@@ -343,11 +381,15 @@ if conf.id ~= nil then
 	apply_time(conf)
 	local res_wg = apply_wg(conf)
 
-	-- the config has been validated.
-	-- do an atomic replace in $tmpdir where noderoute.lua will
-	-- fetch it from.
-	os.execute("cp " .. config_file .. " " .. config_file .. ".copy")
-	os.execute("mv " .. config_file .. ".copy " .. tmpdir .. "/noderoute.json")
+	-- The config has been validated. Do an atomic replace in $tmpdir, where
+	-- noderoute.sh and parker-sites read it. noderoute.sh starts a new cycle
+	-- when the file is newer than its last cycle. Thus replace the file only
+	-- when the content changed.
+	local noderoute_json = tmpdir .. "/noderoute.json"
+	if not same_config(noderoute_json, config_file) then
+		os.execute("cp " .. config_file .. " " .. config_file .. ".copy")
+		os.execute("mv " .. config_file .. ".copy " .. noderoute_json)
+	end
 	if not res_wg then
 		os.exit(1)
 	end
