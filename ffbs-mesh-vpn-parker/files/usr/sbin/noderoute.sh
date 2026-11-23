@@ -5,9 +5,6 @@
 tmpdir=/tmp/ff-Ohb0ba0u/
 config_file="${tmpdir}noderoute.json"
 cycle_stamp="${tmpdir}noderoute-cycle"
-# noderoute.lua logs its state only when it changes. Without a record, its
-# first cycle logs it.
-state_file="${tmpdir}noderoute-state"
 
 # Shortest possible time between two cycles.
 CYCLE_SLEEP=10
@@ -26,7 +23,8 @@ BATMAN_POLL_SLEEP=10
 
 LOGGER="logger -s -t noderoute.sh"
 $LOGGER Starting up.
-rm -f "$state_file"
+# Make the first cycle of noderoute.lua log its state.
+rm -f "${tmpdir}noderoute-state"
 
 # The set of usable tunnels the running configuration is based on.
 tunnels=""
@@ -68,8 +66,7 @@ recover_batman() {
 }
 
 active_tunnels() {
-	# The tunnels noderoute.lua considers usable. parker/tunnels.lua owns
-	# the rules (handshake age, parker-sites status).
+	# The tunnels noderoute.lua can use, see parker/tunnels.lua.
 	lua -e 'io.write(require("parker.tunnels").key())'
 }
 

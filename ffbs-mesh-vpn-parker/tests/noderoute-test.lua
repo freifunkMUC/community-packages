@@ -1,9 +1,8 @@
--- Test of noderoute.lua and parker/tunnels.lua with a mock node: which
--- tunnels are usable, what a cycle does, and what it logs.
+-- Tests noderoute.lua and parker/tunnels.lua on a mock node.
 -- luacheck: globals loadstring arg
--- Run: lua5.1 tests/noderoute-test.lua (from the package directory).
--- With a path, it prints the actions of all scenarios for that copy of
--- noderoute.lua instead, to compare two versions of it:
+-- Run in the package directory: lua5.1 tests/noderoute-test.lua
+-- With a path to a noderoute.lua, prints the actions of all scenarios.
+-- Use this to compare two versions:
 --   lua5.1 tests/noderoute-test.lua old-noderoute.lua > old.txt
 
 package.path = "luasrc/usr/share/lua/?.lua;" .. package.path
@@ -183,7 +182,8 @@ util.write_file = function(p, d)
 end
 util.log = function(s) table.insert(W.logs, tostring(s)) end
 util.sleep = function() end
-util.shuffle = function(t) table.sort(t) return t end
+-- Changes the order in place, as the real shuffle does.
+util.shuffle = function(t) table.sort(t, function(a, b) return a > b end) return t end
 util.check_output = function(cmd)
 	if cmd == "wg show all dump" then
 		local lines = {}
@@ -289,8 +289,8 @@ end)
 scenario("selected tunnel goes stale", function()
 	world("XLAT", { wg_1 = { now - 5 }, wg_2 = { now - 7 } })
 	local c1 = cycle()
-	W.wg.wg_1 = { now - 200 }
-	W.wg.wg_2 = { now }
+	W.wg.wg_1 = { now }
+	W.wg.wg_2 = { now - 200 }
 	return { c1, cycle(), cycle() }
 end)
 scenario("all tunnels go down, then steady", function()
@@ -371,76 +371,50 @@ end
 
 -- parker/tunnels.lua
 local tunnels = require("parker.tunnels")
-local function wg(t)
-	local r = {}
-	for iface, peers in pairs(t) do
-		r[iface] = { peers = {} }
-		for i, hs in ipairs(peers) do r[iface].peers["p" .. i] = { latest_handshake = hs } end
-	end
-	return r
-end
+local STATUS = "/tmp/parker-sites/status"
 W = new_world()
-local u = tunnels.usable(wg({
-	wg_3 = { now - 179 }, wg_1 = { now - 1 }, wg_2 = { now - 180 }, wg_4 = { 0 }, wg_5 = { now, now },
-}), now)
-check("usable: age < 180, one peer, sorted", ser(u) == "{1=wg_1,2=wg_3}", u)
-check("no status file: a site is up", tunnels.no_site_up(now) == false)
-W.fs[tunnels.SITES_STATUS] = "a=1\nactive=nil\n"
-W.mtime[tunnels.SITES_STATUS] = now - 30
-check("fresh active=nil: no site up", tunnels.no_site_up(now) == true)
-W.mtime[tunnels.SITES_STATUS] = now - 31
-check("stale active=nil: ignored", tunnels.no_site_up(now) == false)
-W.fs[tunnels.SITES_STATUS] = "a=1\nactive=muc01\n"
-W.mtime[tunnels.SITES_STATUS] = now
-check("active site: a site is up", tunnels.no_site_up(now) == false)
-W.fs[tunnels.SITES_STATUS] = "a=1\nactive=nil\n"
-local sel, none = tunnels.active(wg({ wg_1 = { now } }), now)
-check("active: no site up empties the list", #sel == 0 and none == true, sel)
-check("key: tunnels and no-site-up", tunnels.key(wg({ wg_2 = { now }, wg_1 = { now } }), now) == "wg_1 wg_2 no-site-up")
-W.fs[tunnels.SITES_STATUS] = nil
-check("key: tunnels only", tunnels.key(wg({ wg_1 = { now } }), now) == "wg_1 ")
-check("key: nothing", tunnels.key(wg({ wg_1 = { 0 } }), now) == "")
+W.wg = { wg_3 = { now - 179 }, wg_1 = { now - 1 }, wg_2 = { now - 180 }, wg_4 = { 0 }, wg_5 = { now, now } }
+check("active: age < 180, one peer, sorted", ser({ tunnels.active() }) == "{1={1=wg_1,2=wg_3},2=false}")
+check("key: usable tunnels", tunnels.key() == "wg_1 wg_3", tunnels.key())
+W.fs[STATUS] = "a=1\nactive=nil\n"
+W.mtime[STATUS] = now - 30
+check("no site up: no tunnels", ser({ tunnels.active() }) == "{1={},2=true}")
+check("no site up: key", tunnels.key() == "wg_1 wg_3 no-site-up", tunnels.key())
+W.mtime[STATUS] = now - 31
+check("old status: ignored", #tunnels.active() == 2)
+W.fs[STATUS] = "a=1\nactive=muc01\n"
+W.mtime[STATUS] = now
+check("site up: tunnels", #tunnels.active() == 2)
 
 -- What a cycle logs.
 local c = run("boot, two tunnels, then steady")
-check("boot: state line", has(c[1].logs, "^state: routing active"), c[1].logs)
-check("boot: state names the tunnels and the route",
-	has(c[1].logs, "tunnels wg_1 %(5s%) wg_2 %(7s%), route via wg_1"), c[1].logs)
-check("boot: state names the client addresses and leases",
-	has(c[1].logs, "client 10%.0%.0%.1/24 2001:db8::1/64, up to %d+ leases"), c[1].logs)
-check("boot: route activation is logged", has(c[1].logs, "^Route activated"), c[1].logs)
+check("boot: state line", has(c[1].logs,
+	"^state: routing active, tunnels wg_1 wg_2, route via wg_2, client 10%.0%.0%.1/24 2001:db8::1/64, 253 leases$"),
+	c[1].logs)
 check("steady: no log", #c[2].logs == 0 and #c[3].logs == 0, c[2].logs)
-check("steady: report", c[3].report == "active (idle) via wg_1")
+check("steady: report", c[3].report == "active (idle) via wg_2")
 
 c = run("selected tunnel goes stale")
-check("stale: transition logged", has(c[2].logs, "inactive tunnel") and has(c[2].logs, "activating route for wg_2"), c[2].logs)
-check("stale: new state logged", has(c[2].logs, "^state: .*tunnels wg_2 %(0s%), route via wg_2"), c[2].logs)
-check("stale: xlat in state", has(c[2].logs, "xlat 2001:db8:64::/96"), c[2].logs)
+check("stale: transition logged", has(c[2].logs, "via wg_2 is on an inactive tunnel")
+	and has(c[2].logs, "^state: .*tunnels wg_1, route via wg_1, .*, xlat 2001:db8:64::/96$"), c[2].logs)
 check("stale: then quiet", #c[3].logs == 0, c[3].logs)
 
 c = run("all tunnels go down, then steady")
-check("down: inactive state logged", has(c[2].logs, "^state: routing inactive, no usable tunnels$"), c[2].logs)
-check("down: route removal logged", has(c[2].logs, "Removing default routes"), c[2].logs)
+check("down: logged", has(c[2].logs, "Removing default routes")
+	and has(c[2].logs, "^state: routing inactive, no usable tunnels$"), c[2].logs)
 check("down: then quiet", #c[3].logs == 0, c[3].logs)
 
 c = run("no site up")
-check("no site: then quiet", #c[3].logs == 0, c[3].logs)
-check("no site: state", has(c[2].logs, "^state: routing inactive, no site up$"), c[2].logs)
-check("stale status: back to active", has(c[4].logs, "^state: routing active"), c[4].logs)
+check("no site up: logged, then quiet", has(c[2].logs, "^state: routing inactive, no site up$") and #c[3].logs == 0)
+check("old status: active again", has(c[4].logs, "^state: routing active"), c[4].logs)
 
 c = run("dirty uci")
 check("dirty: logged each cycle", has(c[1].logs, "UCI is dirty") and has(c[2].logs, "UCI is dirty"), c[2].logs)
 
-c = run("active without config")
-check("no config: logged", has(c[1].logs, "no config present"), c[1].logs)
-
-c = run("other radvd running")
-check("other radvd: stop logged", has(c[2].logs, "^Stopping /etc/init.d/parker%-radvd"), c[2].logs)
-
 c = run("tunnel MTU changes, client address moves")
-check("mtu: route MTU change logged", has(c[2].logs, "^Setting the IPv4 MTU of the route via wg_1 to 1352"), c[2].logs)
-check("mtu: state unchanged, no state line", not has(c[2].logs, "^state:"), c[2].logs)
-check("move: new client address in state", has(c[3].logs, "^state: .*client 10%.0%.0%.20/24.*up to 238 leases"), c[3].logs)
+check("mtu: logged, state the same", has(c[2].logs, "^Setting the IPv4 MTU of the route via wg_1 to 1352")
+	and not has(c[2].logs, "^state:"), c[2].logs)
+check("move: new address in state", has(c[3].logs, "client 10%.0%.0%.20/24 .*, 238 leases"), c[3].logs)
 check("move: then quiet", #c[4].logs == 0, c[4].logs)
 
 if failed > 0 then

@@ -23,8 +23,7 @@ local CONFIG_FILE = tmpdir .. "/noderoute.json"
 -- back from.
 local ROUTE4_FILE = tmpdir .. "/noderoute-route4"
 
--- The state line of the last cycle, see log_state(). noderoute.sh removes
--- it when it starts, so the first cycle always logs its state.
+-- The last state line, see log_state(). noderoute.sh deletes it at start.
 local STATE_FILE = tmpdir .. "/noderoute-state"
 
 -- dnsmasq's name for the DHCPv4 option of RFC 8925, which tells a client
@@ -64,7 +63,7 @@ local SERVICES_TIMEOUT = 20
 
 util.loggername = "noderoute.lua"
 
--- What this cycle has found and configured, for log_state().
+-- The state of this cycle, for log_state().
 local state = {}
 
 local function dump(foo)
@@ -103,7 +102,7 @@ local function get_wg_routes()
 					if mtu == nil then
 						mtu = recorded_mtu4(line)
 					end
-					table.insert(result, { iface = iface:sub(5), mtu = mtu, line = line })
+					table.insert(result, { iface = iface:sub(5), mtu = mtu })
 				end
 			end
 		end
@@ -400,9 +399,8 @@ local function radvd_services(conf)
 end
 
 local function configure_routing(conf, address4)
-	-- Stage the uci settings of a node that routes for its clients, and
-	-- set up what goes with them. Returns whether this is the first time
-	-- since boot.
+	-- Stage the uci settings to route for the clients. Returns true on the
+	-- first call after boot.
 	dhcpnak.stop()
 	ragoodbye.cancel()
 	state.routing = "active"
@@ -430,15 +428,15 @@ local function configure_routing(conf, address4)
 	uci_set("dhcp", DHCP_IFACE, "start", start)
 	uci_set("dhcp", DHCP_IFACE, "limit", limit)
 	uci_set("dhcp", DHCP_IFACE, "force", "1")
-	state.leases = limit
 
 	uci_set("network", DHCP_IFACE, "proto", "static")
 	uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
 	uci_set("network", DHCP_IFACE, "ip6addr", conf.address6 .. "/" .. prefix6_len)
 	state.client = address4 .. "/" .. prefix_len .. " " .. conf.address6 .. "/" .. prefix6_len
+	state.client = state.client .. ", " .. limit .. " leases"
 	if conf.xlat_range6 then
 		uci_set("network", DHCP_IFACE, "xlat_range6", conf.xlat_range6)
-		state.client = state.client .. " xlat " .. conf.xlat_range6
+		state.client = state.client .. ", xlat " .. conf.xlat_range6
 	end
 	uci_set("network", "client6", "proto", "static")
 	uci_set("network", "gluon_bat0", "gw_mode", "server")
@@ -458,10 +456,9 @@ local function configure_routing(conf, address4)
 end
 
 local function configure_client()
-	-- Stage the uci settings of a node that only meshes, and take down
-	-- what goes with routing. Returns our client address while we routed
-	-- for the clients (see parker/dhcpnak.lua), and whether the radvd and
-	-- the CLAT configuration have been deleted.
+	-- Stage the uci settings to stop routing. Returns the old client
+	-- address (see parker/dhcpnak.lua), and whether the radvd and the CLAT
+	-- configuration were deleted.
 	state.routing = "inactive"
 	local nak_cidr = nil
 	local radvd_config_deleted = false
@@ -498,87 +495,102 @@ local function configure_client()
 	return nak_cidr, radvd_config_deleted, xlat_config_deleted
 end
 
-local function stop_other_radvd(other_radvd)
-	-- Returns whether it was running.
+local function apply_network(conf, target_state, address4, mtu)
+	if uci.get("dhcp", DHCP_IFACE) == nil then
+		uci_set("dhcp", DHCP_IFACE, "dhcp")
+	end
+
+	local first_time_active_since_boot = false
+	local nak_cidr = nil
+	local radvd_config_deleted = false
+	local xlat_config_deleted = false
+	local dhcp_options_changed = false
+	if target_state == true then
+		first_time_active_since_boot = configure_routing(conf, address4)
+	else
+		nak_cidr, radvd_config_deleted, xlat_config_deleted = configure_client()
+	end
+
+	local changed = sections_changed()
+	local radvd, other_radvd = radvd_services(conf)
+	local radvd_stopped = false
 	if os.execute(other_radvd .. " running >/dev/null 2>&1") == 0 then
 		util.log("Stopping " .. other_radvd)
 		os.execute(other_radvd .. " stop")
-		return true
+		radvd_stopped = true
 	end
-	return false
-end
 
-local function reload_network(radvd, address4, target_state)
-	-- Commit the staged uci settings and wait for netifd to apply them.
-	dump(uci.changes())
-	uci_commit("dhcp")
-	uci_commit("network")
-	util.log("Reconfiguring network...")
-	util.log("HACK: stopping " .. radvd)
-	os.execute(radvd .. " stop")
-	util.sleep(1)
-	util.log("HACK: continuing with network reload")
-	os.execute("/etc/init.d/network reload")
-	if not target_state then
-		-- The reload restarted odhcp6c. Tell ffmuc-ipv6-ra-filter, so
-		-- that it does not restart odhcp6c again while it starts.
-		local uptime = util.read_file("/proc/uptime")
-		if uptime then
-			util.write_file("/tmp/ffmuc-ipv6-ra-filter.client6", uptime:match("^%d+") .. "\n")
+	if changed then
+		dump(uci.changes())
+		uci_commit("dhcp")
+		uci_commit("network")
+		util.log("Reconfiguring network...")
+		util.log("HACK: stopping " .. radvd)
+		os.execute(radvd .. " stop")
+		radvd_stopped = true
+		util.sleep(1)
+		util.log("HACK: continuing with network reload")
+		os.execute("/etc/init.d/network reload")
+		if not target_state then
+			-- The reload restarted odhcp6c. Tell ffmuc-ipv6-ra-filter, so
+			-- that it does not restart odhcp6c again while it starts.
+			local uptime = util.read_file("/proc/uptime")
+			if uptime then
+				util.write_file("/tmp/ffmuc-ipv6-ra-filter.client6", uptime:match("^%d+") .. "\n")
+			end
 		end
+		util.log("Network reload finished. Waiting for " .. DHCP_IFACE .. " to be reconfigured...")
+		if util.wait_for(function()
+			return network_applied(address4, target_state)
+		end, NETWORK_TIMEOUT) then
+			util.log("..." .. DHCP_IFACE .. " has been reconfigured.")
+		else
+			util.log("..." .. DHCP_IFACE .. " did not settle within " .. NETWORK_TIMEOUT .. "s. Continuing anyway.")
+		end
+		changed = true
 	end
-	util.log("Network reload finished. Waiting for " .. DHCP_IFACE .. " to be reconfigured...")
-	if util.wait_for(function()
-		return network_applied(address4, target_state)
-	end, NETWORK_TIMEOUT) then
-		util.log("..." .. DHCP_IFACE .. " has been reconfigured.")
-	else
-		util.log("..." .. DHCP_IFACE .. " did not settle within " .. NETWORK_TIMEOUT .. "s. Continuing anyway.")
-	end
-end
 
-local function update_dnsmasq(conf, target_state, first_time_active_since_boot)
-	-- Returns whether dnsmasq has been restarted.
+	if nak_cidr ~= nil then
+		dhcpnak.start(nak_cidr)
+	end
+
 	local dnsmasq_limits_changed, lease_range4, lease_max = apply_dnsmasq_limits(conf, target_state)
+
 	if first_time_active_since_boot then
 		util.log("First run since boot. Restarting dnsmasq to generate a valid config")
 		restart_dnsmasq(lease_range4, lease_max)
-		return true
+		changed = true
 	elseif dnsmasq_limits_changed then
 		-- dnsmasq keeps its leases in the lease file over a restart.
 		util.log("Restarting dnsmasq for the new client limits")
 		restart_dnsmasq(lease_range4, lease_max)
-		return true
+		changed = true
 	end
-	return false
-end
 
-local function update_pref64(conf, target_state)
 	-- A node that translates IPv4 for its clients announces the NAT64 prefix
 	-- in its router advertisements (RFC 8781), so clients can translate for
 	-- themselves as well. uradvd only reads /tmp/pref64 when it starts, so
-	-- the file has to be in place before update_radvd() restarts it; the
-	-- CLAT itself is set up by update_clat(). Returns whether it changed.
+	-- the file has to be in place before the restart below; the CLAT itself
+	-- is set up further down.
+	local pref64_changed = false
 	local pref64 = util.read_file("/tmp/pref64")
 	if target_state and conf.xlat_range6 ~= nil then
 		if pref64 ~= NAT64_PREFIX then
 			util.write_file("/tmp/pref64", NAT64_PREFIX)
+			pref64_changed = true
 			util.log("Announcing NAT64 prefix " .. NAT64_PREFIX .. " to our clients")
-			return true
 		end
 	elseif pref64 ~= nil then
 		os.execute("rm /tmp/pref64 -f")
+		pref64_changed = true
 		util.log("No longer announcing a NAT64 prefix to our clients")
-		return true
 	end
-	return false
-end
 
-local function update_adv_mtu(target_state, mtu)
 	-- Our clients reach everything through the tunnel, so what fits into
 	-- it is what they may put on the wire. The IPv6 half of that goes into
 	-- the router advertisements (RFC 4861), out of the same file uradvd
-	-- reads the NAT64 prefix from. Returns whether it changed.
+	-- reads the NAT64 prefix from.
+	local adv_mtu_changed = false
 	local adv_mtu = util.read_file(ADV_MTU_FILE)
 	local want_adv_mtu = nil
 	if target_state and mtu ~= nil and mtu >= MIN_ADV_MTU then
@@ -587,27 +599,23 @@ local function update_adv_mtu(target_state, mtu)
 	if want_adv_mtu ~= nil then
 		if want_adv_mtu ~= adv_mtu then
 			util.write_file(ADV_MTU_FILE, want_adv_mtu)
+			adv_mtu_changed = true
 			util.log("Announcing an MTU of " .. want_adv_mtu .. " to our clients")
-			return true
 		end
 	elseif adv_mtu ~= nil then
 		os.execute("rm " .. ADV_MTU_FILE .. " -f")
+		adv_mtu_changed = true
 		util.log("No longer announcing an MTU to our clients")
-		return true
 	end
-	return false
-end
 
-local function update_radvd(conf, target_state, radvd, restart)
-	-- The stop in reload_network() and stop_other_radvd() is not
-	-- conditional on anything radvd announces, so it has to be paired with
-	-- a start here even when none of the announced values changed: a
-	-- network reconfiguration that touches neither the prefix nor the MTU
-	-- (the duplicate-address move, for example) must not leave the clients
-	-- without router advertisements. Returns whether radvd has been
-	-- restarted or stopped.
+	-- The stop above is not conditional on anything radvd announces, so it
+	-- has to be paired with a start here even when none of the announced
+	-- values changed: a network reconfiguration that touches neither the
+	-- prefix nor the MTU (the duplicate-address move, for example) must not
+	-- leave the clients without router advertisements.
 	local range6 = util.read_file("/tmp/range6")
-	if (target_state and range6 ~= conf.range6) or restart then
+	if (target_state and range6 ~= conf.range6) or radvd_config_deleted
+			or pref64_changed or adv_mtu_changed or radvd_stopped then
 		if target_state and conf.range6 ~= nil then
 			util.write_file("/tmp/range6", conf.range6)
 			util.write_file("/tmp/addr6", conf.address6)
@@ -618,25 +626,19 @@ local function update_radvd(conf, target_state, radvd, restart)
 			-- so an explicit stop is both quieter and equivalent.
 			os.execute(radvd .. " stop")
 		end
-		return true
+		changed = true
 	end
-	return false
-end
 
-local function update_dhcp_options(conf, target_state, mtu, xlat)
-	-- Returns whether an option has changed, i.e. dnsmasq has to reload.
-	local changed = false
-
-	-- The IPv4 half of the MTU goes out with the addresses we lease (RFC
-	-- 2132). A client that translates for itself uses its own IPv6 MTU for
-	-- that and ignores this one, which is why both are announced.
+	-- The IPv4 half goes out with the addresses we lease (RFC 2132). A
+	-- client that translates for itself uses its own IPv6 MTU for that and
+	-- ignores this one, which is why both are announced.
 	local client_mtu4 = nil
 	if target_state and mtu ~= nil then
 		client_mtu4 = clat_mtu(conf, mtu) or mtu
 	end
 	-- { nil } is the empty list, i.e. no such option.
 	if set_client_option(MTU_OPTION, { client_mtu4 }) then
-		changed = true
+		dhcp_options_changed = true
 		if client_mtu4 ~= nil then
 			util.log("Announcing an IPv4 MTU of " .. client_mtu4 .. " to our clients")
 		else
@@ -650,90 +652,34 @@ local function update_dhcp_options(conf, target_state, mtu, xlat)
 	-- lives in /tmp and is gone after a reboot, while the option we have
 	-- committed is still in uci, so a node that comes up without tunnels
 	-- would go on announcing it to clients it cannot translate for.
+	local xlat = target_state and conf ~= nil and conf.xlat_range6 or nil
 	if set_client_option(IPV6_ONLY_OPTION, { xlat and "0" }) then
-		changed = true
+		dhcp_options_changed = true
 		if xlat ~= nil then
 			util.log("Announcing IPv6-only Preferred to our clients")
 		else
 			util.log("No longer announcing IPv6-only Preferred to our clients")
 		end
 	end
-	return changed
-end
 
-local function update_clat(xlat, xlat_config_deleted)
 	-- The CLAT that does the translating. Our clients are told about it by
-	-- the DHCPv4 option and by the PREF64 option; this is only about the
-	-- service, which is as gone as its marker file after a reboot. Returns
-	-- whether it has been started or stopped.
+	-- the DHCPv4 option above and by the PREF64 option further up; this is
+	-- only about the service, which is as gone as its marker file after a
+	-- reboot.
 	local xlat_range6 = util.read_file("/tmp/xlat_range6")
 	if xlat ~= nil then
 		if xlat_range6 ~= xlat then
 			util.write_file("/tmp/xlat_range6", xlat)
 			os.execute("/etc/init.d/ebpf-clat start")
 			util.log("Started ebpf-clat")
-			return true
+			changed = true
 		end
 	elseif xlat_range6 ~= nil or xlat_config_deleted then
 		os.execute("/etc/init.d/ebpf-clat stop")
 		util.log("Stopped ebpf-clat")
-		return true
-	end
-	return false
-end
-
-local function wait_for_services()
-	util.log("Some network config has changed. Waiting for the client services...")
-	if util.wait_for(services_ready, SERVICES_TIMEOUT) then
-		util.log("...client services are up.")
-	else
-		util.log("...client services are not up after " .. SERVICES_TIMEOUT .. "s. Continuing anyway.")
-	end
-end
-
-local function apply_network(conf, target_state, address4, mtu)
-	if uci.get("dhcp", DHCP_IFACE) == nil then
-		uci_set("dhcp", DHCP_IFACE, "dhcp")
-	end
-
-	local first_time_active_since_boot = false
-	local nak_cidr = nil
-	local radvd_config_deleted = false
-	local xlat_config_deleted = false
-	if target_state == true then
-		first_time_active_since_boot = configure_routing(conf, address4)
-	else
-		nak_cidr, radvd_config_deleted, xlat_config_deleted = configure_client()
-	end
-
-	local changed = sections_changed()
-	local radvd, other_radvd = radvd_services(conf)
-	local radvd_stopped = stop_other_radvd(other_radvd)
-	if changed then
-		reload_network(radvd, address4, target_state)
-		radvd_stopped = true
-	end
-
-	if nak_cidr ~= nil then
-		dhcpnak.start(nak_cidr)
-	end
-
-	if update_dnsmasq(conf, target_state, first_time_active_since_boot) then
 		changed = true
 	end
 
-	local pref64_changed = update_pref64(conf, target_state)
-	local adv_mtu_changed = update_adv_mtu(target_state, mtu)
-	local radvd_restart = radvd_config_deleted or pref64_changed or adv_mtu_changed or radvd_stopped
-	if update_radvd(conf, target_state, radvd, radvd_restart) then
-		changed = true
-	end
-
-	local xlat = target_state and conf ~= nil and conf.xlat_range6 or nil
-	local dhcp_options_changed = update_dhcp_options(conf, target_state, mtu, xlat)
-	if update_clat(xlat, xlat_config_deleted) then
-		changed = true
-	end
 	if dhcp_options_changed then
 		-- One reload, however many of the options above have changed.
 		util.log("Reloading dnsmasq to serve our clients the options they now get")
@@ -742,14 +688,18 @@ local function apply_network(conf, target_state, address4, mtu)
 	end
 
 	if changed and target_state then
-		wait_for_services()
+		util.log("Some network config has changed. Waiting for the client services...")
+		if util.wait_for(services_ready, SERVICES_TIMEOUT) then
+			util.log("...client services are up.")
+		else
+			util.log("...client services are not up after " .. SERVICES_TIMEOUT .. "s. Continuing anyway.")
+		end
 	end
 
 	return true
 end
 
 local function remove_wg_default_routes(family)
-	-- Returns whether there was a route to remove.
 	local found = false
 	local output = util.check_output("ip " .. family .. " r show")
 	for line in string.gmatch(output, "[^\n]+") do
@@ -765,7 +715,6 @@ local function remove_wg_default_routes(family)
 			end
 		end
 	end
-	return found
 end
 
 local function update(report)
@@ -784,12 +733,8 @@ local function update(report)
 		util.log("Applied the client limits to the kernel (event mode: " .. tostring(active) .. ")")
 	end
 
-	local now = os.time()
-	local wg = util.get_wg_info()
-	local ages = tunnels.handshake_ages(wg, now)
-	local active, no_site_up = tunnels.active(wg, now, ages)
-	state.ages = ages
-	state.active = active
+	local active, no_site_up = tunnels.active()
+	state.tunnels = table.concat(active, " ")
 	state.no_site_up = no_site_up
 
 	local conf_json = util.read_file(CONFIG_FILE)
@@ -833,11 +778,6 @@ local function update(report)
 	end
 
 	local current = get_wg_routes()
-	if #current > 1 then
-		for _, route in ipairs(current) do
-			util.log("Default route: " .. route.line)
-		end
-	end
 	assert(#current <= 1, "too many current routes")
 	current = current[1]
 	if current and util.has_value(active, current.iface) then
@@ -859,7 +799,7 @@ local function update(report)
 		end
 		state.route = current.iface
 		report:write("active (idle) via " .. current.iface .. note)
-		return true
+		return
 	end
 	if current then
 		util.log("The current route via " .. current.iface .. " is on an inactive tunnel. Going to reconfigure")
@@ -871,7 +811,7 @@ local function update(report)
 		remove_wg_default_routes("-6")
 		os.execute("ip -6 r del default table " .. CLIENT_TABLE .. " proto " .. RT_PROTO .. " 2>/dev/null")
 		report:write("inactive")
-		return true
+		return
 	end
 
 	local configured = false
@@ -895,51 +835,33 @@ local function update(report)
 			util.log("Out of options. Not activating any route.")
 		end
 	end
-	return true
-end
-
-local function state_line(with_ages)
-	local parts = { "routing " .. tostring(state.routing) }
-	if state.no_site_up then
-		table.insert(parts, "no site up")
-	elseif #state.active == 0 then
-		table.insert(parts, "no usable tunnels")
-	else
-		local names = {}
-		for _, iface in ipairs(state.active) do
-			table.insert(names, with_ages and (iface .. " (" .. state.ages[iface] .. "s)") or iface)
-		end
-		table.insert(parts, "tunnels " .. table.concat(names, " "))
-		table.insert(parts, state.route and ("route via " .. state.route) or "no route")
-	end
-	if state.client then
-		table.insert(parts, "client " .. state.client)
-	end
-	if state.leases then
-		table.insert(parts, "up to " .. state.leases .. " leases")
-	end
-	return "state: " .. table.concat(parts, ", ")
 end
 
 local function log_state()
-	-- One line on what this cycle has found and configured, logged only
-	-- when it differs from the last cycle. The handshake ages change in
-	-- every cycle, so they are left out of the comparison.
-	local key = state_line(false)
-	if util.read_file(STATE_FILE) == key then
+	-- Log one line when the state is not the same as in the last cycle.
+	-- A cycle that does not configure the network has no state.
+	if state.routing == nil then
 		return
 	end
-	util.write_file(STATE_FILE, key)
-	util.log(state_line(true))
+	local line = "state: routing " .. state.routing
+	if state.no_site_up then
+		line = line .. ", no site up"
+	elseif state.tunnels == "" then
+		line = line .. ", no usable tunnels"
+	else
+		line = line .. ", tunnels " .. state.tunnels .. ", route via " .. (state.route or "none")
+	end
+	if state.client then
+		line = line .. ", client " .. state.client
+	end
+	if util.read_file(STATE_FILE) ~= line then
+		util.write_file(STATE_FILE, line)
+		util.log(line)
+	end
 end
 
 local report = io.open("/tmp/nodeconfig-report.tmp", "w")
-if update(report) then
-	log_state()
-else
-	-- A cycle that has not configured the node has no state to compare
-	-- with. The next one that does logs its state.
-	os.remove(STATE_FILE)
-end
+update(report)
+log_state()
 report:close()
 os.execute("mv /tmp/nodeconfig-report.tmp /tmp/nodeconfig-report")
