@@ -336,6 +336,11 @@ scenario("tunnel MTU changes, client address moves", function()
 	W.address4 = "10.0.0.20"
 	return { c1, c2, cycle(), cycle() }
 end)
+scenario("no xlat: client address does not move", function()
+	world("CONF", { wg_1 = { now - 5 } })
+	W.address4 = "10.0.0.20"
+	return { cycle() }
+end)
 
 if TRACE then
 	for _, s in ipairs(scenarios) do
@@ -416,6 +421,9 @@ check("mtu: logged, state the same", has(c[2].logs, "^Setting the IPv4 MTU of th
 	and not has(c[2].logs, "^state:"), c[2].logs)
 check("move: new address in state", has(c[3].logs, "client 10%.0%.0%.20/24 .*, 238 leases"), c[3].logs)
 check("move: then quiet", #c[4].logs == 0, c[4].logs)
+
+c = run("no xlat: client address does not move")
+check("no xlat: address4 of the config service", has(c[1].logs, "client 10%.0%.0%.1/24 .*, 253 leases$"), c[1].logs)
 
 if failed > 0 then
 	os.exit(1)

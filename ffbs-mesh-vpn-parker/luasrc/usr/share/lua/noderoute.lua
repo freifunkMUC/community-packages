@@ -760,9 +760,13 @@ local function update(report)
 			report:write("no-config")
 			return
 		end
-		-- Only a node that routes for its clients claims an address on the
-		-- client network, and only that one can be in the way of another.
-		local address4 = clientaddr.select(conf, tmpdir)
+		-- Only with 464XLAT can the config service give all nodes the same
+		-- range4, because the client IPv4 then does not leave the node.
+		-- Only then can the address4 of another node be the same as ours.
+		local address4 = conf.address4
+		if conf.xlat_range6 ~= nil then
+			address4 = clientaddr.select(conf, tmpdir)
+		end
 		if address4 ~= conf.address4 then
 			note = " (client ip " .. address4 .. ")"
 		end

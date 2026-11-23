@@ -1,9 +1,9 @@
 -- Keep the client-facing IPv4 address of this node out of the way of the
 -- other nodes on the same layer 2 segment.
 --
--- The config service hands out the same range4 and the same address4 - the
--- first usable address of that range - to every node: there is no per-node
--- IPv4 assignment. Nodes that mesh with each other bridge their clients
+-- noderoute uses this module only with 464XLAT (xlat_range6). Then the
+-- config service can hand out the same range4 and the same address4 - the
+-- first usable address of that range - to every node. Nodes that mesh with each other bridge their clients
 -- into one segment, so as soon as more than one of them routes for those
 -- clients, all of them claim that single address and ARP on that segment
 -- becomes a coin toss.

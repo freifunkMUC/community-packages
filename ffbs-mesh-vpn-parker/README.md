@@ -237,13 +237,18 @@ The code is in `parker/limits.lua`.
 Client addresses
 ----------------
 
-The config service hands the same `range4` and the same `address4` to every
-node, so all the nodes that mesh with each other claim the same address on
-the client network they share. A node that finds another one using its
-address therefore moves to one of the first 16 addresses of `range4`, chosen
-from its own MAC, and remembers that in `parker.client.address4` until the
-config service gives it a different range. Nodes that have moved keep that
-block of addresses out of the DHCP pool they hand to their clients.
+Without `xlat_range6`, the node always uses `address4` of the config
+service. Each node routes its own `range4`, so no other node uses this
+address.
+
+With `xlat_range6` (464XLAT), the client IPv4 does not leave the node. The
+config service can then give the same `range4` and `address4` to all nodes.
+Nodes that mesh with each other then use the same address on the shared
+client network. A node that finds another node with its address moves to
+one of the first 16 addresses of `range4`. It selects the address from its
+own MAC and keeps it in `parker.client.address4` until the config service
+gives a different range. A node that has moved keeps these 16 addresses out
+of its DHCP pool. The code is in `/usr/share/lua/clientaddr.lua`.
 
 MTU
 ---
