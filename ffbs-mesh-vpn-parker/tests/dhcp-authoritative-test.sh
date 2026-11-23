@@ -47,10 +47,10 @@ ip -n cl addr add 10.0.0.50/24 dev eth0
 for n in cl srv; do ip -n "$n" link set eth0 up; ip -n "$n" link set lo up; done
 
 
-# dnsmasq like a Parker node. $@: extra options.
+# dnsmasq like a Parker node. $@: extra options. $LEASES: the lease file.
 dnsmasq_start() {
 	[ -n "$PID" ] && kill "$PID" 2>/dev/null && sleep 0.5
-	: > /tmp/dhcp-auth.leases
+	printf '%s' "$LEASES" > /tmp/dhcp-auth.leases
 	ip netns exec srv dnsmasq -k --port=0 --no-resolv --no-hosts --interface=eth0 \
 		--dhcp-leasefile=/tmp/dhcp-auth.leases --pid-file= --no-ping "$@" 2>/dev/null &
 	PID=$!
@@ -84,8 +84,21 @@ check "renewal per unicast: DHCPACK" "$(client request 10.0.0.1 10.0.0.50)" ack
 check "rebinding: DHCPACK" "$(client request 255.255.255.255 10.0.0.50)" ack
 
 echo "4. inactive node (parker/dhcpnak.lua): DHCPNAK for the old clients"
-dnsmasq_start --dhcp-authoritative --dhcp-range=set:parker-nak,10.0.0.0,static,255.255.255.0
+NAK="--dhcp-range=set:parker-nak,10.0.0.0,static,255.255.255.0"
+dnsmasq_start "$NAK"
 check "renewal per unicast: DHCPNAK" "$(client request 10.0.0.1 10.0.0.50)" nak
 check "DHCPDISCOVER: no answer" "$(client discover 255.255.255.255 0.0.0.0)" none
+check "SELECTING with foreign Server-ID: no answer" \
+	"$(client request 255.255.255.255 0.0.0.0 10.0.0.50 10.0.0.2)" none
+check "rebinding without a known lease: no answer" \
+	"$(client request 255.255.255.255 10.0.0.50)" none
+LEASES="$(($(date +%s) + 120)) 02:00:00:00:00:50 10.0.0.50 * *
+"
+dnsmasq_start "$NAK"
+check "rebinding with a known lease: DHCPNAK" "$(client request 255.255.255.255 10.0.0.50)" nak
+check "INIT-REBOOT with a known lease: DHCPNAK" \
+	"$(client request 255.255.255.255 0.0.0.0 10.0.0.50)" nak
+check "renewal per unicast with a known lease: DHCPNAK" "$(client request 10.0.0.1 10.0.0.50)" nak
+LEASES=""
 
 exit $FAIL

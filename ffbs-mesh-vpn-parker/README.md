@@ -79,6 +79,8 @@ The node gives leases of 2 minutes to its clients. A client renews its lease aft
 
 When the node stops routing for its clients, it keeps its old client address for 150 seconds (`/32` on `br-client`).
 In this time, dnsmasq answers each renewal with a DHCPNAK and ignores each DHCPDISCOVER.
+dnsmasq stays not authoritative in this time. An authoritative dnsmasq also NAKs a DHCPREQUEST in SELECTING state for another server (against RFC 2131 4.3.2), and the clients of an active uplink then lose their new lease.
+Thus a broadcast rebinding for a lease that is not in the lease file gets no DHCPNAK. Such a client waits until its lease ends (at most 2 minutes).
 The client then gets a new lease from an active uplink.
 Without the DHCPNAK, the client keeps the old uplink as its router until the lease runs out.
 With 464XLAT (`xlat_range6`), other uplinks can have the same client address (see "Client addresses").

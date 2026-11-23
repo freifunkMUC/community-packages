@@ -10,6 +10,14 @@
 -- dnsmasq sends a DHCPNAK for an address in a "static" range that it has not
 -- assigned, and it ignores a DHCPDISCOVER for such a range.
 --
+-- dnsmasq is not authoritative here (see 905-dhcp-not-authoritative). An
+-- authoritative dnsmasq also sends a DHCPNAK to a DHCPREQUEST in SELECTING
+-- state for another server, against RFC 2131 4.3.2. Thus a client of an
+-- active uplink can lose the lease that it is about to get. Without it,
+-- dnsmasq NAKs a renewal per unicast, and a rebinding or INIT-REBOOT for a
+-- lease in its lease file. A rebinding for a lease that it does not know
+-- gets no answer: that client waits until its lease (2 min) ends.
+--
 -- With 464XLAT, the config service can give all uplinks the same client
 -- address (see clientaddr.lua). When another node uses the address (an
 -- uplink that has become active), we must not hold it: two nodes would
@@ -91,7 +99,7 @@ function dhcpnak.start(cidr, shared)
 		return false
 	end
 	os.execute("ip addr replace " .. addr .. "/32 dev " .. IFACE)
-	set_conf("dhcp-authoritative\ndhcp-range=set:parker-nak," .. net .. ",static," .. mask .. "\n")
+	set_conf("dhcp-range=set:parker-nak," .. net .. ",static," .. mask .. "\n")
 	util.write_file(STATE_FILE, addr .. " " .. os.time() .. (shared and " shared" or ""))
 	util.log("DHCP: sending DHCPNAK to the clients of " .. addr .. " for " .. dhcpnak.HOLD .. "s")
 	return true
