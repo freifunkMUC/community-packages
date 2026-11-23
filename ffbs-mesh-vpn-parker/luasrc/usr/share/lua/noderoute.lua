@@ -403,185 +403,187 @@ local function radvd_services(conf)
 	return "/etc/init.d/gluon-radvd", "/etc/init.d/parker-radvd"
 end
 
-local function apply_network(conf, target_state, address4, mtu)
-	if uci.get("dhcp", DHCP_IFACE) == nil then
-		uci_set("dhcp", DHCP_IFACE, "dhcp")
+local function configure_routing(conf, address4)
+	-- Stage the uci settings of a node that routes for its clients, and
+	-- set up what goes with them. Returns whether this is the first time
+	-- since boot.
+	dhcpnak.stop()
+	ragoodbye.cancel()
+	util.log("network: routing state: active")
+	local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
+	-- Offset 1 is our own address and the last one is the broadcast
+	-- address, so the pool runs from offset 2 to the one before the
+	-- broadcast address.
+	local start = 2
+	local limit = limits.pool(conf.range4)
+	local prefix6_len = tonumber(util.str_split(conf.range6, "[^/]+")[2])
+
+	if address4 ~= conf.address4 then
+		-- We have moved out of the way of another node, so the block of
+		-- addresses we may move to has to stay out of the pool. The end
+		-- of the pool stays where it is for everybody.
+		start = clientaddr.RESERVED + 1
+		limit = limit - (start - 2)
 	end
 
+	uci_set("dhcp", DHCP_IFACE, "interface", DHCP_IFACE)
+	-- Short leases: after a gateway change, a client of the old uplink
+	-- asks again after 1 min at the latest (see parker/dhcpnak.lua).
+	-- 2m is the minimum of dnsmasq.
+	uci_set("dhcp", DHCP_IFACE, "leasetime", "2m")
+	uci_set("dhcp", DHCP_IFACE, "start", start)
+	uci_set("dhcp", DHCP_IFACE, "limit", limit)
+	uci_set("dhcp", DHCP_IFACE, "force", "1")
+	util.log("Configuring DHCPD on " .. DHCP_IFACE .. " with up to " .. limit .. " leases")
+
+	uci_set("network", DHCP_IFACE, "proto", "static")
+	uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
+	util.log(DHCP_IFACE .. " ipaddr: " .. address4 .. "/" .. prefix_len)
+	uci_set("network", DHCP_IFACE, "ip6addr", conf.address6 .. "/" .. prefix6_len)
+	util.log(DHCP_IFACE .. " ip6addr: " .. conf.address6 .. "/" .. prefix6_len)
+	if conf.xlat_range6 then
+		uci_set("network", DHCP_IFACE, "xlat_range6", conf.xlat_range6)
+		util.log(DHCP_IFACE .. " xlat_range6: " .. conf.xlat_range6)
+	end
+	uci_set("network", "client6", "proto", "static")
+	uci_set("network", "gluon_bat0", "gw_mode", "server")
+	if not util.check_output("ebtables-tiny -L PARKER_RADV"):find("DROP") then
+		os.execute("ebtables-tiny -A PARKER_RADV -j DROP")
+	end
+	-- Our clients must not renew a lease of another uplink (see
+	-- /lib/gluon/ebtables/402-parker-dhcp-renew).
+	if not util.check_output("ebtables-tiny -L PARKER_DHCP"):find("DROP") then
+		os.execute("ebtables-tiny -A PARKER_DHCP -j DROP")
+	end
+	if util.read_file("/tmp/parker_online") == nil then
+		os.execute("touch /tmp/parker_online")
+		return true
+	end
+	return false
+end
+
+local function configure_client()
+	-- Stage the uci settings of a node that only meshes, and take down
+	-- what goes with routing. Returns our client address while we routed
+	-- for the clients (see parker/dhcpnak.lua), and whether the radvd and
+	-- the CLAT configuration have been deleted.
+	util.log("network: routing state: inactive")
+	local nak_cidr = nil
 	local radvd_config_deleted = false
 	local xlat_config_deleted = false
-	local first_time_active_since_boot = false
-	local dhcp_options_changed = false
-	-- Our client address while we routed for the clients, see parker/dhcpnak.lua.
-	local nak_cidr = nil
 
-	if target_state == true then
-		dhcpnak.stop()
-		ragoodbye.cancel()
-		util.log("network: routing state: active")
-		local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
-		-- Offset 1 is our own address and the last one is the broadcast
-		-- address, so the pool runs from offset 2 to the one before the
-		-- broadcast address.
-		local start = 2
-		local limit = limits.pool(conf.range4)
-		local prefix6_len = tonumber(util.str_split(conf.range6, "[^/]+")[2])
+	if uci.get("network", DHCP_IFACE, "proto") == "static" then
+		nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
+		-- Router lifetime 0 only when a new router is there, see
+		-- parker/ragoodbye.lua.
+		ragoodbye.send()
+	end
+	uci_set("network", DHCP_IFACE, "proto", "dhcp")
+	-- dnsmasq stops its DHCPD-job when the interface is not 'proto static'
 
-		if address4 ~= conf.address4 then
-			-- We have moved out of the way of another node, so the block of
-			-- addresses we may move to has to stay out of the pool. The end
-			-- of the pool stays where it is for everybody.
-			start = clientaddr.RESERVED + 1
-			limit = limit - (start - 2)
-		end
+	uci_delete("network", DHCP_IFACE, "ipaddr")
+	uci_delete("network", DHCP_IFACE, "ip6addr")
+	uci_delete("network", DHCP_IFACE, "xlat_range6")
+	uci_set("network", "client6", "proto", "dhcpv6")
 
-		uci_set("dhcp", DHCP_IFACE, "interface", DHCP_IFACE)
-		-- Short leases: after a gateway change, a client of the old uplink
-		-- asks again after 1 min at the latest (see parker/dhcpnak.lua).
-		-- 2m is the minimum of dnsmasq.
-		uci_set("dhcp", DHCP_IFACE, "leasetime", "2m")
-		uci_set("dhcp", DHCP_IFACE, "start", start)
-		uci_set("dhcp", DHCP_IFACE, "limit", limit)
-		uci_set("dhcp", DHCP_IFACE, "force", "1")
-		util.log("Configuring DHCPD on " .. DHCP_IFACE .. " with up to " .. limit .. " leases")
+	uci_set("network", "gluon_bat0", "gw_mode", "client")
 
-		uci_set("network", DHCP_IFACE, "proto", "static")
-		uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
-		util.log(DHCP_IFACE .. " ipaddr: " .. address4 .. "/" .. prefix_len)
-		uci_set("network", DHCP_IFACE, "ip6addr", conf.address6 .. "/" .. prefix6_len)
-		util.log(DHCP_IFACE .. " ip6addr: " .. conf.address6 .. "/" .. prefix6_len)
-		if conf.xlat_range6 then
-			uci_set("network", DHCP_IFACE, "xlat_range6", conf.xlat_range6)
-			util.log(DHCP_IFACE .. " xlat_range6: " .. conf.xlat_range6)
-		end
-		uci_set("network", "client6", "proto", "static")
-		uci_set("network", "gluon_bat0", "gw_mode", "server")
-		if not util.check_output("ebtables-tiny -L PARKER_RADV"):find("DROP") then
-			os.execute("ebtables-tiny -A PARKER_RADV -j DROP")
-		end
-		-- Our clients must not renew a lease of another uplink (see
-		-- /lib/gluon/ebtables/402-parker-dhcp-renew).
-		if not util.check_output("ebtables-tiny -L PARKER_DHCP"):find("DROP") then
-			os.execute("ebtables-tiny -A PARKER_DHCP -j DROP")
-		end
-		if util.read_file("/tmp/parker_online") == nil then
-			os.execute("touch /tmp/parker_online")
-			first_time_active_since_boot = true
-		end
-	else
-		-- target_state == false
-		util.log("network: routing state: inactive")
-
-		if uci.get("network", DHCP_IFACE, "proto") == "static" then
-			nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
-			-- Router lifetime 0 only when a new router is there, see
-			-- parker/ragoodbye.lua.
-			ragoodbye.send()
-		end
-		uci_set("network", DHCP_IFACE, "proto", "dhcp")
-		-- dnsmasq stops its DHCPD-job when the interface is not 'proto static'
-
-		uci_delete("network", DHCP_IFACE, "ipaddr")
-		uci_delete("network", DHCP_IFACE, "ip6addr")
-		uci_delete("network", DHCP_IFACE, "xlat_range6")
-		uci_set("network", "client6", "proto", "dhcpv6")
-
-		uci_set("network", "gluon_bat0", "gw_mode", "client")
-
-		if util.read_file("/tmp/range6") ~= nil then
-			os.execute("rm /tmp/range6 -f")
-			os.execute("rm /tmp/addr6 -f")
-			radvd_config_deleted = true
-		end
-		if util.read_file("/tmp/xlat_range6") ~= nil then
-			os.execute("rm /tmp/xlat_range6 -f")
-			xlat_config_deleted = true
-		end
-
-		os.execute("ebtables-tiny -F PARKER_RADV")
-		os.execute("ebtables-tiny -F PARKER_DHCP")
+	if util.read_file("/tmp/range6") ~= nil then
+		os.execute("rm /tmp/range6 -f")
+		os.execute("rm /tmp/addr6 -f")
+		radvd_config_deleted = true
+	end
+	if util.read_file("/tmp/xlat_range6") ~= nil then
+		os.execute("rm /tmp/xlat_range6 -f")
+		xlat_config_deleted = true
 	end
 
-	local changed = sections_changed()
-	local radvd, other_radvd = radvd_services(conf)
-	local radvd_stopped = false
+	os.execute("ebtables-tiny -F PARKER_RADV")
+	os.execute("ebtables-tiny -F PARKER_DHCP")
+	return nak_cidr, radvd_config_deleted, xlat_config_deleted
+end
+
+local function stop_other_radvd(other_radvd)
+	-- Returns whether it was running.
 	if os.execute(other_radvd .. " running >/dev/null 2>&1") == 0 then
 		util.log("Stopping " .. other_radvd)
 		os.execute(other_radvd .. " stop")
-		radvd_stopped = true
+		return true
 	end
+	return false
+end
 
-	if changed then
-		dump(uci.changes())
-		uci_commit("dhcp")
-		uci_commit("network")
-		util.log("Reconfiguring network...")
-		util.log("HACK: stopping " .. radvd)
-		os.execute(radvd .. " stop")
-		radvd_stopped = true
-		util.sleep(1)
-		util.log("HACK: continuing with network reload")
-		os.execute("/etc/init.d/network reload")
-		if not target_state then
-			-- The reload restarted odhcp6c. Tell ffmuc-ipv6-ra-filter, so
-			-- that it does not restart odhcp6c again while it starts.
-			local uptime = util.read_file("/proc/uptime")
-			if uptime then
-				util.write_file("/tmp/ffmuc-ipv6-ra-filter.client6", uptime:match("^%d+") .. "\n")
-			end
+local function reload_network(radvd, address4, target_state)
+	-- Commit the staged uci settings and wait for netifd to apply them.
+	dump(uci.changes())
+	uci_commit("dhcp")
+	uci_commit("network")
+	util.log("Reconfiguring network...")
+	util.log("HACK: stopping " .. radvd)
+	os.execute(radvd .. " stop")
+	util.sleep(1)
+	util.log("HACK: continuing with network reload")
+	os.execute("/etc/init.d/network reload")
+	if not target_state then
+		-- The reload restarted odhcp6c. Tell ffmuc-ipv6-ra-filter, so
+		-- that it does not restart odhcp6c again while it starts.
+		local uptime = util.read_file("/proc/uptime")
+		if uptime then
+			util.write_file("/tmp/ffmuc-ipv6-ra-filter.client6", uptime:match("^%d+") .. "\n")
 		end
-		util.log("Network reload finished. Waiting for " .. DHCP_IFACE .. " to be reconfigured...")
-		if util.wait_for(function()
-			return network_applied(address4, target_state)
-		end, NETWORK_TIMEOUT) then
-			util.log("..." .. DHCP_IFACE .. " has been reconfigured.")
-		else
-			util.log("..." .. DHCP_IFACE .. " did not settle within " .. NETWORK_TIMEOUT .. "s. Continuing anyway.")
-		end
-		changed = true
 	end
-
-	if nak_cidr ~= nil then
-		dhcpnak.start(nak_cidr)
+	util.log("Network reload finished. Waiting for " .. DHCP_IFACE .. " to be reconfigured...")
+	if util.wait_for(function()
+		return network_applied(address4, target_state)
+	end, NETWORK_TIMEOUT) then
+		util.log("..." .. DHCP_IFACE .. " has been reconfigured.")
+	else
+		util.log("..." .. DHCP_IFACE .. " did not settle within " .. NETWORK_TIMEOUT .. "s. Continuing anyway.")
 	end
+end
 
+local function update_dnsmasq(conf, target_state, first_time_active_since_boot)
+	-- Returns whether dnsmasq has been restarted.
 	local dnsmasq_limits_changed, lease_range4, lease_max = apply_dnsmasq_limits(conf, target_state)
-
 	if first_time_active_since_boot then
 		util.log("First run since boot. Restarting dnsmasq to generate a valid config")
 		restart_dnsmasq(lease_range4, lease_max)
-		changed = true
+		return true
 	elseif dnsmasq_limits_changed then
 		-- dnsmasq keeps its leases in the lease file over a restart.
 		util.log("Restarting dnsmasq for the new client limits")
 		restart_dnsmasq(lease_range4, lease_max)
-		changed = true
+		return true
 	end
+	return false
+end
 
+local function update_pref64(conf, target_state)
 	-- A node that translates IPv4 for its clients announces the NAT64 prefix
 	-- in its router advertisements (RFC 8781), so clients can translate for
 	-- themselves as well. uradvd only reads /tmp/pref64 when it starts, so
-	-- the file has to be in place before the restart below; the CLAT itself
-	-- is set up further down.
-	local pref64_changed = false
+	-- the file has to be in place before update_radvd() restarts it; the
+	-- CLAT itself is set up by update_clat(). Returns whether it changed.
 	local pref64 = util.read_file("/tmp/pref64")
 	if target_state and conf.xlat_range6 ~= nil then
 		if pref64 ~= NAT64_PREFIX then
 			util.write_file("/tmp/pref64", NAT64_PREFIX)
-			pref64_changed = true
 			util.log("Announcing NAT64 prefix " .. NAT64_PREFIX .. " to our clients")
+			return true
 		end
 	elseif pref64 ~= nil then
 		os.execute("rm /tmp/pref64 -f")
-		pref64_changed = true
 		util.log("No longer announcing a NAT64 prefix to our clients")
+		return true
 	end
+	return false
+end
 
+local function update_adv_mtu(target_state, mtu)
 	-- Our clients reach everything through the tunnel, so what fits into
 	-- it is what they may put on the wire. The IPv6 half of that goes into
 	-- the router advertisements (RFC 4861), out of the same file uradvd
-	-- reads the NAT64 prefix from.
-	local adv_mtu_changed = false
+	-- reads the NAT64 prefix from. Returns whether it changed.
 	local adv_mtu = util.read_file(ADV_MTU_FILE)
 	local want_adv_mtu = nil
 	if target_state and mtu ~= nil and mtu >= MIN_ADV_MTU then
@@ -590,23 +592,27 @@ local function apply_network(conf, target_state, address4, mtu)
 	if want_adv_mtu ~= nil then
 		if want_adv_mtu ~= adv_mtu then
 			util.write_file(ADV_MTU_FILE, want_adv_mtu)
-			adv_mtu_changed = true
 			util.log("Announcing an MTU of " .. want_adv_mtu .. " to our clients")
+			return true
 		end
 	elseif adv_mtu ~= nil then
 		os.execute("rm " .. ADV_MTU_FILE .. " -f")
-		adv_mtu_changed = true
 		util.log("No longer announcing an MTU to our clients")
+		return true
 	end
+	return false
+end
 
-	-- The stop above is not conditional on anything radvd announces, so it
-	-- has to be paired with a start here even when none of the announced
-	-- values changed: a network reconfiguration that touches neither the
-	-- prefix nor the MTU (the duplicate-address move, for example) must not
-	-- leave the clients without router advertisements.
+local function update_radvd(conf, target_state, radvd, restart)
+	-- The stop in reload_network() and stop_other_radvd() is not
+	-- conditional on anything radvd announces, so it has to be paired with
+	-- a start here even when none of the announced values changed: a
+	-- network reconfiguration that touches neither the prefix nor the MTU
+	-- (the duplicate-address move, for example) must not leave the clients
+	-- without router advertisements. Returns whether radvd has been
+	-- restarted or stopped.
 	local range6 = util.read_file("/tmp/range6")
-	if (target_state and range6 ~= conf.range6) or radvd_config_deleted
-			or pref64_changed or adv_mtu_changed or radvd_stopped then
+	if (target_state and range6 ~= conf.range6) or restart then
 		if target_state and conf.range6 ~= nil then
 			util.write_file("/tmp/range6", conf.range6)
 			util.write_file("/tmp/addr6", conf.address6)
@@ -617,19 +623,25 @@ local function apply_network(conf, target_state, address4, mtu)
 			-- so an explicit stop is both quieter and equivalent.
 			os.execute(radvd .. " stop")
 		end
-		changed = true
+		return true
 	end
+	return false
+end
 
-	-- The IPv4 half goes out with the addresses we lease (RFC 2132). A
-	-- client that translates for itself uses its own IPv6 MTU for that and
-	-- ignores this one, which is why both are announced.
+local function update_dhcp_options(conf, target_state, mtu, xlat)
+	-- Returns whether an option has changed, i.e. dnsmasq has to reload.
+	local changed = false
+
+	-- The IPv4 half of the MTU goes out with the addresses we lease (RFC
+	-- 2132). A client that translates for itself uses its own IPv6 MTU for
+	-- that and ignores this one, which is why both are announced.
 	local client_mtu4 = nil
 	if target_state and mtu ~= nil then
 		client_mtu4 = clat_mtu(conf, mtu) or mtu
 	end
 	-- { nil } is the empty list, i.e. no such option.
 	if set_client_option(MTU_OPTION, { client_mtu4 }) then
-		dhcp_options_changed = true
+		changed = true
 		if client_mtu4 ~= nil then
 			util.log("Announcing an IPv4 MTU of " .. client_mtu4 .. " to our clients")
 		else
@@ -643,34 +655,90 @@ local function apply_network(conf, target_state, address4, mtu)
 	-- lives in /tmp and is gone after a reboot, while the option we have
 	-- committed is still in uci, so a node that comes up without tunnels
 	-- would go on announcing it to clients it cannot translate for.
-	local xlat = target_state and conf ~= nil and conf.xlat_range6 or nil
 	if set_client_option(IPV6_ONLY_OPTION, { xlat and "0" }) then
-		dhcp_options_changed = true
+		changed = true
 		if xlat ~= nil then
 			util.log("Announcing IPv6-only Preferred to our clients")
 		else
 			util.log("No longer announcing IPv6-only Preferred to our clients")
 		end
 	end
+	return changed
+end
 
+local function update_clat(xlat, xlat_config_deleted)
 	-- The CLAT that does the translating. Our clients are told about it by
-	-- the DHCPv4 option above and by the PREF64 option further up; this is
-	-- only about the service, which is as gone as its marker file after a
-	-- reboot.
+	-- the DHCPv4 option and by the PREF64 option; this is only about the
+	-- service, which is as gone as its marker file after a reboot. Returns
+	-- whether it has been started or stopped.
 	local xlat_range6 = util.read_file("/tmp/xlat_range6")
 	if xlat ~= nil then
 		if xlat_range6 ~= xlat then
 			util.write_file("/tmp/xlat_range6", xlat)
 			os.execute("/etc/init.d/ebpf-clat start")
 			util.log("Started ebpf-clat")
-			changed = true
+			return true
 		end
 	elseif xlat_range6 ~= nil or xlat_config_deleted then
 		os.execute("/etc/init.d/ebpf-clat stop")
 		util.log("Stopped ebpf-clat")
+		return true
+	end
+	return false
+end
+
+local function wait_for_services()
+	util.log("Some network config has changed. Waiting for the client services...")
+	if util.wait_for(services_ready, SERVICES_TIMEOUT) then
+		util.log("...client services are up.")
+	else
+		util.log("...client services are not up after " .. SERVICES_TIMEOUT .. "s. Continuing anyway.")
+	end
+end
+
+local function apply_network(conf, target_state, address4, mtu)
+	if uci.get("dhcp", DHCP_IFACE) == nil then
+		uci_set("dhcp", DHCP_IFACE, "dhcp")
+	end
+
+	local first_time_active_since_boot = false
+	local nak_cidr = nil
+	local radvd_config_deleted = false
+	local xlat_config_deleted = false
+	if target_state == true then
+		first_time_active_since_boot = configure_routing(conf, address4)
+	else
+		nak_cidr, radvd_config_deleted, xlat_config_deleted = configure_client()
+	end
+
+	local changed = sections_changed()
+	local radvd, other_radvd = radvd_services(conf)
+	local radvd_stopped = stop_other_radvd(other_radvd)
+	if changed then
+		reload_network(radvd, address4, target_state)
+		radvd_stopped = true
+	end
+
+	if nak_cidr ~= nil then
+		dhcpnak.start(nak_cidr)
+	end
+
+	if update_dnsmasq(conf, target_state, first_time_active_since_boot) then
 		changed = true
 	end
 
+	local pref64_changed = update_pref64(conf, target_state)
+	local adv_mtu_changed = update_adv_mtu(target_state, mtu)
+	local radvd_restart = radvd_config_deleted or pref64_changed or adv_mtu_changed or radvd_stopped
+	if update_radvd(conf, target_state, radvd, radvd_restart) then
+		changed = true
+	end
+
+	local xlat = target_state and conf ~= nil and conf.xlat_range6 or nil
+	local dhcp_options_changed = update_dhcp_options(conf, target_state, mtu, xlat)
+	if update_clat(xlat, xlat_config_deleted) then
+		changed = true
+	end
 	if dhcp_options_changed then
 		-- One reload, however many of the options above have changed.
 		util.log("Reloading dnsmasq to serve our clients the options they now get")
@@ -679,12 +747,7 @@ local function apply_network(conf, target_state, address4, mtu)
 	end
 
 	if changed and target_state then
-		util.log("Some network config has changed. Waiting for the client services...")
-		if util.wait_for(services_ready, SERVICES_TIMEOUT) then
-			util.log("...client services are up.")
-		else
-			util.log("...client services are not up after " .. SERVICES_TIMEOUT .. "s. Continuing anyway.")
-		end
+		wait_for_services()
 	end
 
 	return true
