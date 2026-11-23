@@ -4,7 +4,7 @@ local dhcpnak = require("parker.dhcpnak")
 local json = require("jsonc")
 local limits = require("parker.limits")
 local ragoodbye = require("parker.ragoodbye")
-local stat = require("posix.sys.stat")
+local tunnels = require("parker.tunnels")
 local util = require("util")
 local uci = require("uci")
 
@@ -68,18 +68,10 @@ local function empty(obj)
 	return next(obj) == nil
 end
 
-local function get_handshake_ages()
-	local result = {}
-	local now = os.time()
-	local wg = util.get_wg_info()
-	for iface, data in pairs(wg) do
-		local peers = data["peers"]
-		if util.tablelength(peers) == 1 then
-			for _, v in pairs(peers) do
-				table.insert(result, { now - v["latest_handshake"], iface })
-				util.log("wg-handshake age on " .. iface .. ": " .. (now - v["latest_handshake"]))
-			end
-		end
+local function get_handshake_ages(wg, now)
+	local result = tunnels.handshake_ages(wg, now)
+	for iface, age in pairs(result) do
+		util.log("wg-handshake age on " .. iface .. ": " .. age)
 	end
 	return result
 end
@@ -698,20 +690,6 @@ local function apply_network(conf, target_state, address4, mtu)
 	return true
 end
 
--- Multi-site operation: parker-sites probes each site every second. When no
--- site is up, our tunnels may still have a recent handshake, but they do
--- not route. Only trust a status that parker-sites has written recently.
-local SITES_STATUS = "/tmp/parker-sites/status"
-local SITES_STATUS_MAX_AGE = 30
-
-local function no_site_up()
-	local st = stat.stat(SITES_STATUS)
-	if not st or os.time() - st.st_mtime > SITES_STATUS_MAX_AGE then
-		return false
-	end
-	return (util.read_file(SITES_STATUS) or ""):find("\nactive=nil\n", 1, true) ~= nil
-end
-
 local function update(report)
 	dhcpnak.expire()
 
@@ -728,17 +706,11 @@ local function update(report)
 		util.log("Applied the client limits to the kernel (event mode: " .. tostring(active) .. ")")
 	end
 
-	local active = {}
-
-	for _, elem in ipairs(get_handshake_ages()) do
-		if elem[1] < 180 then
-			table.insert(active, elem[2])
-		end
-	end
-
-	if #active > 0 and no_site_up() then
+	local now = os.time()
+	local wg = util.get_wg_info()
+	local active, no_site_up = tunnels.active(wg, now, get_handshake_ages(wg, now))
+	if no_site_up then
 		util.log("parker-sites: no site is up")
-		active = {}
 	end
 
 	local conf_json = util.read_file(CONFIG_FILE)
