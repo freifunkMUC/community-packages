@@ -1,0 +1,68 @@
+#!/usr/bin/lua
+
+local site = require 'gluon.site'
+local uci = require('simple-uci').cursor()
+
+-- The dnsmasq section that serves the client network.
+local CLIENT_SECTION = 'client'
+
+-- UniFi reads its controller from suboption 1 of the vendor-specific
+-- option 43. dnsmasq sends it only to clients with vendor class "ubnt".
+local UNIFI_SECTION = 'unifi_controller'
+local UNIFI_OPTION = 'vendor:ubnt,1'
+
+-- Omada reads its controllers from option 138 (CAPWAP, RFC 5417).
+local OMADA_OPTION = '138'
+
+-- dnsmasq does not start with an address that it cannot parse.
+local function ipv4_addresses(addrs)
+	local result = {}
+	for _, addr in ipairs(addrs) do
+		local octets = { addr:match('^(%d+)%.(%d+)%.(%d+)%.(%d+)$') }
+		local valid = #octets == 4
+		for _, octet in ipairs(octets) do
+			valid = valid and tonumber(octet) <= 255
+		end
+		if valid then
+			table.insert(result, addr)
+		end
+	end
+	return result
+end
+
+-- Older firmware had this section in ffbs-mesh-vpn-parker.
+uci:delete('dhcp', 'parker_unifi')
+
+local unifi = ipv4_addresses({ site.dhcp_ap_controllers.unifi4('') })
+if #unifi > 0 then
+	uci:section('dhcp', 'vendorclass', UNIFI_SECTION, {
+		networkid = UNIFI_SECTION,
+		vendorclass = 'ubnt',
+		dhcp_option = { UNIFI_OPTION .. ',' .. unifi[1] },
+	})
+else
+	uci:delete('dhcp', UNIFI_SECTION)
+end
+
+-- Other packages write to the same list. Change only our own entry.
+local options = {}
+for _, option in ipairs(uci:get_list('dhcp', CLIENT_SECTION, 'dhcp_option')) do
+	if option ~= OMADA_OPTION and option:sub(1, #OMADA_OPTION + 1) ~= OMADA_OPTION .. ',' then
+		table.insert(options, option)
+	end
+end
+local omada = ipv4_addresses(site.dhcp_ap_controllers.omada4({}))
+if #omada > 0 then
+	table.insert(options, OMADA_OPTION .. ',' .. table.concat(omada, ','))
+end
+
+if #options > 0 then
+	if uci:get('dhcp', CLIENT_SECTION) == nil then
+		uci:section('dhcp', 'dhcp', CLIENT_SECTION)
+	end
+	uci:set('dhcp', CLIENT_SECTION, 'dhcp_option', options)
+else
+	uci:delete('dhcp', CLIENT_SECTION, 'dhcp_option')
+end
+
+uci:commit('dhcp')
