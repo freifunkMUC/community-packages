@@ -19,9 +19,27 @@ The core services are:
   The service automatically chooses a default route from the available
   Wireshark concentrator connections.
 
-They have their corresponding services in `/etc/init.d/` and are usually quite verbose
-in `logread`.
+They have their corresponding services in `/etc/init.d/` and write to `logread`.
 This package also takes care of generating the WireGuard Keypair for the node.
+
+Noderoute
+---------
+
+`noderoute` does a cycle at most 30 seconds apart.
+A tunnel is usable when its last handshake is less than 180 seconds old.
+When `parker-sites` finds no site up, no tunnel is usable.
+`parker/tunnels.lua` has these rules. `noderoute.lua` and `noderoute.sh` both use it.
+
+`noderoute` logs changes and errors only.
+When the state changes, it logs one line, for example:
+
+    state: routing active, tunnels wg_1 (5s) wg_2 (7s), route via wg_1, client 10.0.0.1/24 2001:db8::1/64, up to 253 leases
+    state: routing inactive, no usable tunnels
+
+A cycle without a change logs nothing.
+After a start of `noderoute`, the first cycle always logs the state.
+
+`lua5.1 tests/noderoute-test.lua` (in the package directory) runs `noderoute.lua` on a mock node.
 
 Router advertisements
 ---------------------

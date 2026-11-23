@@ -23,6 +23,10 @@ local CONFIG_FILE = tmpdir .. "/noderoute.json"
 -- back from.
 local ROUTE4_FILE = tmpdir .. "/noderoute-route4"
 
+-- The state line of the last cycle, see log_state(). noderoute.sh removes
+-- it when it starts, so the first cycle always logs its state.
+local STATE_FILE = tmpdir .. "/noderoute-state"
+
 -- dnsmasq's name for the DHCPv4 option of RFC 8925, which tells a client
 -- that it may do without IPv4 altogether.
 local IPV6_ONLY_OPTION = "option:ipv6-only"
@@ -60,20 +64,15 @@ local SERVICES_TIMEOUT = 20
 
 util.loggername = "noderoute.lua"
 
+-- What this cycle has found and configured, for log_state().
+local state = {}
+
 local function dump(foo)
 	util.log(json.stringify(foo))
 end
 
 local function empty(obj)
 	return next(obj) == nil
-end
-
-local function get_handshake_ages(wg, now)
-	local result = tunnels.handshake_ages(wg, now)
-	for iface, age in pairs(result) do
-		util.log("wg-handshake age on " .. iface .. ": " .. age)
-	end
-	return result
 end
 
 local function recorded_mtu4(line)
@@ -96,18 +95,15 @@ local function get_wg_routes()
 	-- record, and an mtu of false means that we cannot tell.
 	local result = {}
 	local output = util.check_output("ip r show proto " .. RT_PROTO)
-	util.log("Checking for wg routes")
 	for line in string.gmatch(output, "[^\n]+") do
-		util.log("- " .. line)
 		if string.find(line, "default via") then
 			if not string.find(line, "broadcast") then
 				for iface in string.gmatch(line, "dev [a-z0-9-_]+") do
-					util.log("Route found")
 					local mtu = tonumber(string.match(line, "mtu (%d+)"))
 					if mtu == nil then
 						mtu = recorded_mtu4(line)
 					end
-					table.insert(result, { iface = iface:sub(5), mtu = mtu })
+					table.insert(result, { iface = iface:sub(5), mtu = mtu, line = line })
 				end
 			end
 		end
@@ -409,7 +405,7 @@ local function configure_routing(conf, address4)
 	-- since boot.
 	dhcpnak.stop()
 	ragoodbye.cancel()
-	util.log("network: routing state: active")
+	state.routing = "active"
 	local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
 	-- Offset 1 is our own address and the last one is the broadcast
 	-- address, so the pool runs from offset 2 to the one before the
@@ -434,16 +430,15 @@ local function configure_routing(conf, address4)
 	uci_set("dhcp", DHCP_IFACE, "start", start)
 	uci_set("dhcp", DHCP_IFACE, "limit", limit)
 	uci_set("dhcp", DHCP_IFACE, "force", "1")
-	util.log("Configuring DHCPD on " .. DHCP_IFACE .. " with up to " .. limit .. " leases")
+	state.leases = limit
 
 	uci_set("network", DHCP_IFACE, "proto", "static")
 	uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
-	util.log(DHCP_IFACE .. " ipaddr: " .. address4 .. "/" .. prefix_len)
 	uci_set("network", DHCP_IFACE, "ip6addr", conf.address6 .. "/" .. prefix6_len)
-	util.log(DHCP_IFACE .. " ip6addr: " .. conf.address6 .. "/" .. prefix6_len)
+	state.client = address4 .. "/" .. prefix_len .. " " .. conf.address6 .. "/" .. prefix6_len
 	if conf.xlat_range6 then
 		uci_set("network", DHCP_IFACE, "xlat_range6", conf.xlat_range6)
-		util.log(DHCP_IFACE .. " xlat_range6: " .. conf.xlat_range6)
+		state.client = state.client .. " xlat " .. conf.xlat_range6
 	end
 	uci_set("network", "client6", "proto", "static")
 	uci_set("network", "gluon_bat0", "gw_mode", "server")
@@ -467,7 +462,7 @@ local function configure_client()
 	-- what goes with routing. Returns our client address while we routed
 	-- for the clients (see parker/dhcpnak.lua), and whether the radvd and
 	-- the CLAT configuration have been deleted.
-	util.log("network: routing state: inactive")
+	state.routing = "inactive"
 	local nak_cidr = nil
 	local radvd_config_deleted = false
 	local xlat_config_deleted = false
@@ -753,6 +748,26 @@ local function apply_network(conf, target_state, address4, mtu)
 	return true
 end
 
+local function remove_wg_default_routes(family)
+	-- Returns whether there was a route to remove.
+	local found = false
+	local output = util.check_output("ip " .. family .. " r show")
+	for line in string.gmatch(output, "[^\n]+") do
+		if string.find(line, "default via") then
+			if string.find(line, "wg_") then
+				for gw in string.gmatch(line, "via%s+(%S+)") do
+					if not found then
+						util.log("No active tunnels. Removing default routes via wg_x.")
+					end
+					found = true
+					os.execute("ip " .. family .. " r del default via " .. gw)
+				end
+			end
+		end
+	end
+	return found
+end
+
 local function update(report)
 	dhcpnak.expire()
 
@@ -771,10 +786,11 @@ local function update(report)
 
 	local now = os.time()
 	local wg = util.get_wg_info()
-	local active, no_site_up = tunnels.active(wg, now, get_handshake_ages(wg, now))
-	if no_site_up then
-		util.log("parker-sites: no site is up")
-	end
+	local ages = tunnels.handshake_ages(wg, now)
+	local active, no_site_up = tunnels.active(wg, now, ages)
+	state.ages = ages
+	state.active = active
+	state.no_site_up = no_site_up
 
 	local conf_json = util.read_file(CONFIG_FILE)
 	local conf = nil
@@ -792,7 +808,6 @@ local function update(report)
 	-- otherwise this function will simply to nothing
 	local note = ""
 	if #active == 0 then
-		util.log("No active tunnels. Deactivating")
 		apply_network(conf, false)
 	else
 		if conf == nil then
@@ -806,7 +821,6 @@ local function update(report)
 		if address4 ~= conf.address4 then
 			note = " (client ip " .. address4 .. ")"
 		end
-		util.log(#active .. " active tunnels: Applying network state.")
 		-- In event mode the client network is larger than the announced
 		-- range4 (same base, see parker/limits.lua). clientaddr keeps the
 		-- announced range, so a moved address stays valid.
@@ -819,12 +833,13 @@ local function update(report)
 	end
 
 	local current = get_wg_routes()
+	if #current > 1 then
+		for _, route in ipairs(current) do
+			util.log("Default route: " .. route.line)
+		end
+	end
 	assert(#current <= 1, "too many current routes")
 	current = current[1]
-	if current then
-		util.log("Currently " .. current.iface .. " is the selected tunnel")
-	end
-	util.log("There are " .. #active .. " active tunnels")
 	if current and util.has_value(active, current.iface) then
 		if current.mtu ~= route_mtu4 then
 			-- The tunnels have been resized under us, so what our clients
@@ -842,41 +857,21 @@ local function update(report)
 		if client_conc ~= nil then
 			set_client_route(current.iface, client_conc)
 		end
-		util.log("current route still active. Doing nothing.")
+		state.route = current.iface
 		report:write("active (idle) via " .. current.iface .. note)
-		return
+		return true
 	end
 	if current then
-		util.log("The current route is on an inactive tunnel. Going to reconfigure")
+		util.log("The current route via " .. current.iface .. " is on an inactive tunnel. Going to reconfigure")
 	end
 
 	if #active == 0 then
-		util.log("No active tunnels. Removing default routes via wg_x.")
 		os.remove(ROUTE4_FILE)
-		local ip4route = util.check_output("ip -4 r show")
-		for line in string.gmatch(ip4route, "[^\n]+") do
-			if string.find(line, "default via") then
-				if string.find(line, "wg_") then
-					for gw in string.gmatch(line, "via%s+(%S+)") do
-						os.execute("ip -4 r del default via " .. gw)
-					end
-				end
-			end
-		end
-
-		local ip6route = util.check_output("ip -6 r show")
-		for line in string.gmatch(ip6route, "[^\n]+") do
-			if string.find(line, "default via") then
-				if string.find(line, "wg_") then
-					for gw in string.gmatch(line, "via%s+(%S+)") do
-						os.execute("ip -6 r del default via " .. gw)
-					end
-				end
-			end
-		end
+		remove_wg_default_routes("-4")
+		remove_wg_default_routes("-6")
 		os.execute("ip -6 r del default table " .. CLIENT_TABLE .. " proto " .. RT_PROTO .. " 2>/dev/null")
 		report:write("inactive")
-		return
+		return true
 	end
 
 	local configured = false
@@ -892,6 +887,7 @@ local function update(report)
 		end
 		if configured then
 			util.log("Route activated")
+			state.route = act
 			report:write("active" .. note)
 			break
 		else
@@ -899,11 +895,51 @@ local function update(report)
 			util.log("Out of options. Not activating any route.")
 		end
 	end
+	return true
 end
 
-util.log("Starting up")
+local function state_line(with_ages)
+	local parts = { "routing " .. tostring(state.routing) }
+	if state.no_site_up then
+		table.insert(parts, "no site up")
+	elseif #state.active == 0 then
+		table.insert(parts, "no usable tunnels")
+	else
+		local names = {}
+		for _, iface in ipairs(state.active) do
+			table.insert(names, with_ages and (iface .. " (" .. state.ages[iface] .. "s)") or iface)
+		end
+		table.insert(parts, "tunnels " .. table.concat(names, " "))
+		table.insert(parts, state.route and ("route via " .. state.route) or "no route")
+	end
+	if state.client then
+		table.insert(parts, "client " .. state.client)
+	end
+	if state.leases then
+		table.insert(parts, "up to " .. state.leases .. " leases")
+	end
+	return "state: " .. table.concat(parts, ", ")
+end
+
+local function log_state()
+	-- One line on what this cycle has found and configured, logged only
+	-- when it differs from the last cycle. The handshake ages change in
+	-- every cycle, so they are left out of the comparison.
+	local key = state_line(false)
+	if util.read_file(STATE_FILE) == key then
+		return
+	end
+	util.write_file(STATE_FILE, key)
+	util.log(state_line(true))
+end
+
 local report = io.open("/tmp/nodeconfig-report.tmp", "w")
-update(report)
+if update(report) then
+	log_state()
+else
+	-- A cycle that has not configured the node has no state to compare
+	-- with. The next one that does logs its state.
+	os.remove(STATE_FILE)
+end
 report:close()
 os.execute("mv /tmp/nodeconfig-report.tmp /tmp/nodeconfig-report")
-util.log("Done")

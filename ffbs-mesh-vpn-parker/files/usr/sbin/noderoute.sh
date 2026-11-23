@@ -5,6 +5,9 @@
 tmpdir=/tmp/ff-Ohb0ba0u/
 config_file="${tmpdir}noderoute.json"
 cycle_stamp="${tmpdir}noderoute-cycle"
+# noderoute.lua logs its state only when it changes. Without a record, its
+# first cycle logs it.
+state_file="${tmpdir}noderoute-state"
 
 # Shortest possible time between two cycles.
 CYCLE_SLEEP=10
@@ -23,6 +26,7 @@ BATMAN_POLL_SLEEP=10
 
 LOGGER="logger -s -t noderoute.sh"
 $LOGGER Starting up.
+rm -f "$state_file"
 
 # The set of usable tunnels the running configuration is based on.
 tunnels=""
@@ -110,7 +114,6 @@ if [ "$(uci -q get gluon.mesh_vpn.enabled)" = 1 ]; then
 fi
 
 while true; do
-	$LOGGER Cycling
 	touch "$cycle_stamp"
 	tunnels="$(active_tunnels)"
 	if ! lua /usr/share/lua/noderoute.lua $tmpdir ; then

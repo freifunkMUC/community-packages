@@ -235,15 +235,20 @@ os.execute = function(cmd) -- luacheck: ignore
 	return 0
 end
 
--- noderoute.lua runs a cycle when it is loaded. Load only its functions.
+-- Each cycle runs all of noderoute.lua, as a new lua process on the node does.
 local TMP = "/tmp/ff"
-arg = { TMP } -- luacheck: ignore
-W = new_world()
-local f = assert(io.open(SRC))
-local src = f:read("*a")
+local REPORT = {}
+local real_open = io.open
+io.open = function(p, mode) -- luacheck: ignore
+	if p == "/tmp/nodeconfig-report.tmp" then
+		REPORT.text = nil
+		return { write = function(_, s) REPORT.text = s end, close = function() end }
+	end
+	return real_open(p, mode)
+end
+local f = assert(real_open(SRC))
+local noderoute = assert(load_chunk(f:read("*a"), "noderoute.lua"))
 f:close()
-local cut = assert(src:find("\nlocal report = io.open", 1, true))
-local update = assert(load_chunk(src:sub(1, cut) .. "return update"))()
 
 -- Scenarios -------------------------------------------------------------
 
@@ -268,11 +273,10 @@ end
 
 local function cycle()
 	W.actions, W.logs = {}, {}
-	local report = {}
-	function report.write(_, s) report.text = s end
-	update(report)
+	arg = { TMP } -- luacheck: ignore
+	noderoute()
 	now = now + 30
-	return { actions = W.actions, logs = W.logs, report = report.text }
+	return { actions = W.actions, logs = W.logs, report = REPORT.text }
 end
 
 local scenarios = {}
@@ -396,6 +400,48 @@ check("key: tunnels and no-site-up", tunnels.key(wg({ wg_2 = { now }, wg_1 = { n
 W.fs[tunnels.SITES_STATUS] = nil
 check("key: tunnels only", tunnels.key(wg({ wg_1 = { now } }), now) == "wg_1 ")
 check("key: nothing", tunnels.key(wg({ wg_1 = { 0 } }), now) == "")
+
+-- What a cycle logs.
+local c = run("boot, two tunnels, then steady")
+check("boot: state line", has(c[1].logs, "^state: routing active"), c[1].logs)
+check("boot: state names the tunnels and the route",
+	has(c[1].logs, "tunnels wg_1 %(5s%) wg_2 %(7s%), route via wg_1"), c[1].logs)
+check("boot: state names the client addresses and leases",
+	has(c[1].logs, "client 10%.0%.0%.1/24 2001:db8::1/64, up to %d+ leases"), c[1].logs)
+check("boot: route activation is logged", has(c[1].logs, "^Route activated"), c[1].logs)
+check("steady: no log", #c[2].logs == 0 and #c[3].logs == 0, c[2].logs)
+check("steady: report", c[3].report == "active (idle) via wg_1")
+
+c = run("selected tunnel goes stale")
+check("stale: transition logged", has(c[2].logs, "inactive tunnel") and has(c[2].logs, "activating route for wg_2"), c[2].logs)
+check("stale: new state logged", has(c[2].logs, "^state: .*tunnels wg_2 %(0s%), route via wg_2"), c[2].logs)
+check("stale: xlat in state", has(c[2].logs, "xlat 2001:db8:64::/96"), c[2].logs)
+check("stale: then quiet", #c[3].logs == 0, c[3].logs)
+
+c = run("all tunnels go down, then steady")
+check("down: inactive state logged", has(c[2].logs, "^state: routing inactive, no usable tunnels$"), c[2].logs)
+check("down: route removal logged", has(c[2].logs, "Removing default routes"), c[2].logs)
+check("down: then quiet", #c[3].logs == 0, c[3].logs)
+
+c = run("no site up")
+check("no site: then quiet", #c[3].logs == 0, c[3].logs)
+check("no site: state", has(c[2].logs, "^state: routing inactive, no site up$"), c[2].logs)
+check("stale status: back to active", has(c[4].logs, "^state: routing active"), c[4].logs)
+
+c = run("dirty uci")
+check("dirty: logged each cycle", has(c[1].logs, "UCI is dirty") and has(c[2].logs, "UCI is dirty"), c[2].logs)
+
+c = run("active without config")
+check("no config: logged", has(c[1].logs, "no config present"), c[1].logs)
+
+c = run("other radvd running")
+check("other radvd: stop logged", has(c[2].logs, "^Stopping /etc/init.d/parker%-radvd"), c[2].logs)
+
+c = run("tunnel MTU changes, client address moves")
+check("mtu: route MTU change logged", has(c[2].logs, "^Setting the IPv4 MTU of the route via wg_1 to 1352"), c[2].logs)
+check("mtu: state unchanged, no state line", not has(c[2].logs, "^state:"), c[2].logs)
+check("move: new client address in state", has(c[3].logs, "^state: .*client 10%.0%.0%.20/24.*up to 238 leases"), c[3].logs)
+check("move: then quiet", #c[4].logs == 0, c[4].logs)
 
 if failed > 0 then
 	os.exit(1)
