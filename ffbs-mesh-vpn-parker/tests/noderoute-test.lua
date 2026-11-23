@@ -162,7 +162,7 @@ end
 package.preload["parker.dhcpnak"] = function()
 	return {
 		stop = function() act("dhcpnak.stop") end,
-		start = function(cidr) act("dhcpnak.start " .. tostring(cidr)) end,
+		start = function(cidr, shared) act("dhcpnak.start " .. tostring(cidr) .. " shared=" .. tostring(shared)) end,
 		expire = function() end,
 	}
 end
@@ -341,6 +341,12 @@ scenario("no xlat: client address does not move", function()
 	W.address4 = "10.0.0.20"
 	return { cycle() }
 end)
+scenario("no xlat: all tunnels go down", function()
+	world("CONF", { wg_1 = { now - 5 } })
+	local c1 = cycle()
+	W.wg.wg_1 = { 0 }
+	return { c1, cycle() }
+end)
 
 if TRACE then
 	for _, s in ipairs(scenarios) do
@@ -408,6 +414,9 @@ c = run("all tunnels go down, then steady")
 check("down: logged", has(c[2].logs, "Removing default routes")
 	and has(c[2].logs, "^state: routing inactive, no usable tunnels$"), c[2].logs)
 check("down: then quiet", #c[3].logs == 0, c[3].logs)
+check("down: xlat, shared address", has(c[2].actions, "^dhcpnak%.start 10%.0%.0%.1/24 shared=true$"), c[2].actions)
+c = run("no xlat: all tunnels go down")
+check("down: no xlat, own address", has(c[2].actions, "^dhcpnak%.start 10%.0%.0%.1/24 shared=false$"), c[2].actions)
 
 c = run("no site up")
 check("no site up: logged, then quiet", has(c[2].logs, "^state: routing inactive, no site up$") and #c[3].logs == 0)

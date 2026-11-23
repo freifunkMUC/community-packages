@@ -81,8 +81,10 @@ When the node stops routing for its clients, it keeps its old client address for
 In this time, dnsmasq answers each renewal with a DHCPNAK and ignores each DHCPDISCOVER.
 The client then gets a new lease from an active uplink.
 Without the DHCPNAK, the client keeps the old uplink as its router until the lease runs out.
-The node does not keep the address when batman-adv has seen another node with this address in the last 60 seconds (an uplink that has become active with the same address).
+With 464XLAT (`xlat_range6`), other uplinks can have the same client address (see "Client addresses").
+Then the node does not keep the address when batman-adv has seen another node with this address in the last 60 seconds (an uplink that has become active with the same address).
 It does a check at each `noderoute` cycle (at most 30 seconds apart).
+Without 464XLAT, the address belongs only to this node, and the node keeps it for the full 150 seconds.
 
 A client of an active node can still have a lease of another uplink, for example from the time when the node was a gateway client.
 The client renews this lease per unicast through the mesh, and the other uplink stays its IPv4 router.
@@ -99,6 +101,7 @@ The node does not change an address for this. Thus no two nodes use the same add
 `tests/dhcp-renew-test.sh` (in the package directory) tests the chain with the kernel bridge (see the script for the command).
 
 The code is in `/usr/share/lua/parker/dhcpnak.lua`.
+`lua5.1 tests/dhcpnak-test.lua` tests the hold with and without 464XLAT.
 
 IPv6 after a gateway change
 ---------------------------

@@ -551,7 +551,8 @@ local function apply_network(conf, target_state, address4, mtu)
 	end
 
 	if nak_cidr ~= nil then
-		dhcpnak.start(nak_cidr)
+		-- The same rule as for clientaddr.select() in update().
+		dhcpnak.start(nak_cidr, conf ~= nil and conf.xlat_range6 ~= nil)
 	end
 
 	local dnsmasq_limits_changed, lease_range4, lease_max = apply_dnsmasq_limits(conf, target_state)
