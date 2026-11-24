@@ -405,7 +405,7 @@ Optional fields. Without them, the node operates as before:
 | :------------- | :---------------------------------------------------------- |
 | `xlat_range6`  | 464XLAT mode. The IPv6 range that the CLAT (`ffmuc-ebpf-clat`) translates the IPv4 clients into. The node allows only IPv6 on the tunnels, sends DHCPv4 option 108 and announces the NAT64 prefix `64:ff9b::/96` (PREF64). |
 | `primary_site` | Multi-site operation. The name of the preferred site.        |
-| `captive_portal_url` | Captive portal API URI (RFC 8908). The node sends it in DHCPv4 option 114 (RFC 8910). Only `https://` URIs without a comma, space, quote or `#`, at most 255 bytes. Without the field, the node sends no option 114. |
+| `captive_portal_url` | Captive portal API URI (RFC 8908). The node sends it in DHCPv4 option 114 and in RA option 37 (RFC 8910). RA option 37 needs uradvd with `--captive-portal` and the site patch that passes `/tmp/captive_portal` to uradvd. Only `https://` URIs without a comma, space, quote or `#`, at most 255 bytes. Without the field, the node sends neither option. |
 | `sites`        | Multi-site operation. One object for each site name (see below). |
 
 Fields of each entry in `sites`:
