@@ -31,6 +31,9 @@ local IPV6_ONLY_OPTION = "option:ipv6-only"
 -- use on the network it has just been given an address on.
 local MTU_OPTION = "option:mtu"
 
+-- DHCPv4 option 114 (RFC 8910), the URI of the captive portal API.
+local CAPTIVE_PORTAL_OPTION = "114"
+
 -- What the CLAT adds to an IPv4 packet of a client: 20 bytes between the
 -- IPv4 and the IPv6 header, plus the 8 bytes of the fragment header a
 -- translator has to insert for a packet that may still be fragmented
@@ -658,6 +661,24 @@ local function apply_network(conf, target_state, address4, mtu)
 			util.log("Announcing IPv6-only Preferred to our clients")
 		else
 			util.log("No longer announcing IPv6-only Preferred to our clients")
+		end
+	end
+
+	-- The captive portal URI of the config service (captive_portal_url).
+	-- Without it, the node sends no option 114.
+	local captive_portal = nil
+	if target_state and conf ~= nil and conf.captive_portal_url ~= nil then
+		captive_portal = dhcp.captive_portal_url(conf.captive_portal_url)
+		if captive_portal == nil then
+			util.log("Ignoring invalid captive_portal_url from the config service")
+		end
+	end
+	if set_client_option(CAPTIVE_PORTAL_OPTION, { captive_portal }) then
+		dhcp_options_changed = true
+		if captive_portal ~= nil then
+			util.log("Announcing captive portal " .. captive_portal .. " to our clients")
+		else
+			util.log("No longer announcing a captive portal to our clients")
 		end
 	end
 

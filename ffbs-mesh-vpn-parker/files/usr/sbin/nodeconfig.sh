@@ -118,6 +118,13 @@ while true; do
 		fi
 	fi
 
+	# The Gluon domain of the node. The config service can use it for
+	# per-domain values, for example captive_portal_url.
+	domain=$(uci -q get gluon.core.domain)
+	if echo "$domain" | grep -qE '^[a-z0-9_-]{1,64}$'; then
+		site_info="${site_info}&domain=${domain}"
+	fi
+
 	LD_PRELOAD=libpacketmark.so wget -T "$FETCH_TIMEOUT" "http://${config_server}/config?pubkey=${pubkey}&nonce=${nonce}&v6mtu=${v6mtu}&version=${version}${site_info}${tc_info}" -O "${tmpdir}response" -q
 	RET=$?
 	if [ $RET -gt 0 ]; then
