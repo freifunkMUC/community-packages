@@ -4,7 +4,7 @@ local dhcpnak = require("parker.dhcpnak")
 local json = require("jsonc")
 local limits = require("parker.limits")
 local ragoodbye = require("parker.ragoodbye")
-local stat = require("posix.sys.stat")
+local tunnels = require("parker.tunnels")
 local util = require("util")
 local uci = require("uci")
 
@@ -22,6 +22,9 @@ local CONFIG_FILE = tmpdir .. "/noderoute.json"
 -- metrics, so this is the only place the MTU on that route can be read
 -- back from.
 local ROUTE4_FILE = tmpdir .. "/noderoute-route4"
+
+-- The last state line, see log_state(). noderoute.sh deletes it at start.
+local STATE_FILE = tmpdir .. "/noderoute-state"
 
 -- dnsmasq's name for the DHCPv4 option of RFC 8925, which tells a client
 -- that it may do without IPv4 altogether.
@@ -60,28 +63,15 @@ local SERVICES_TIMEOUT = 20
 
 util.loggername = "noderoute.lua"
 
+-- The state of this cycle, for log_state().
+local state = {}
+
 local function dump(foo)
 	util.log(json.stringify(foo))
 end
 
 local function empty(obj)
 	return next(obj) == nil
-end
-
-local function get_handshake_ages()
-	local result = {}
-	local now = os.time()
-	local wg = util.get_wg_info()
-	for iface, data in pairs(wg) do
-		local peers = data["peers"]
-		if util.tablelength(peers) == 1 then
-			for _, v in pairs(peers) do
-				table.insert(result, { now - v["latest_handshake"], iface })
-				util.log("wg-handshake age on " .. iface .. ": " .. (now - v["latest_handshake"]))
-			end
-		end
-	end
-	return result
 end
 
 local function recorded_mtu4(line)
@@ -104,13 +94,10 @@ local function get_wg_routes()
 	-- record, and an mtu of false means that we cannot tell.
 	local result = {}
 	local output = util.check_output("ip r show proto " .. RT_PROTO)
-	util.log("Checking for wg routes")
 	for line in string.gmatch(output, "[^\n]+") do
-		util.log("- " .. line)
 		if string.find(line, "default via") then
 			if not string.find(line, "broadcast") then
 				for iface in string.gmatch(line, "dev [a-z0-9-_]+") do
-					util.log("Route found")
 					local mtu = tonumber(string.match(line, "mtu (%d+)"))
 					if mtu == nil then
 						mtu = recorded_mtu4(line)
@@ -411,103 +398,117 @@ local function radvd_services(conf)
 	return "/etc/init.d/gluon-radvd", "/etc/init.d/parker-radvd"
 end
 
+local function configure_routing(conf, address4)
+	-- Stage the uci settings to route for the clients. Returns true on the
+	-- first call after boot.
+	dhcpnak.stop()
+	ragoodbye.cancel()
+	state.routing = "active"
+	local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
+	-- Offset 1 is our own address and the last one is the broadcast
+	-- address, so the pool runs from offset 2 to the one before the
+	-- broadcast address.
+	local start = 2
+	local limit = limits.pool(conf.range4)
+	local prefix6_len = tonumber(util.str_split(conf.range6, "[^/]+")[2])
+
+	if address4 ~= conf.address4 then
+		-- We have moved out of the way of another node, so the block of
+		-- addresses we may move to has to stay out of the pool. The end
+		-- of the pool stays where it is for everybody.
+		start = clientaddr.RESERVED + 1
+		limit = limit - (start - 2)
+	end
+
+	uci_set("dhcp", DHCP_IFACE, "interface", DHCP_IFACE)
+	-- Short leases: after a gateway change, a client of the old uplink
+	-- asks again after 1 min at the latest (see parker/dhcpnak.lua).
+	-- 2m is the minimum of dnsmasq.
+	uci_set("dhcp", DHCP_IFACE, "leasetime", "2m")
+	uci_set("dhcp", DHCP_IFACE, "start", start)
+	uci_set("dhcp", DHCP_IFACE, "limit", limit)
+	uci_set("dhcp", DHCP_IFACE, "force", "1")
+
+	uci_set("network", DHCP_IFACE, "proto", "static")
+	uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
+	uci_set("network", DHCP_IFACE, "ip6addr", conf.address6 .. "/" .. prefix6_len)
+	state.client = address4 .. "/" .. prefix_len .. " " .. conf.address6 .. "/" .. prefix6_len
+	state.client = state.client .. ", " .. limit .. " leases"
+	if conf.xlat_range6 then
+		uci_set("network", DHCP_IFACE, "xlat_range6", conf.xlat_range6)
+		state.client = state.client .. ", xlat " .. conf.xlat_range6
+	end
+	uci_set("network", "client6", "proto", "static")
+	uci_set("network", "gluon_bat0", "gw_mode", "server")
+	if not util.check_output("ebtables-tiny -L PARKER_RADV"):find("DROP") then
+		os.execute("ebtables-tiny -A PARKER_RADV -j DROP")
+	end
+	-- Our clients must not renew a lease of another uplink (see
+	-- /lib/gluon/ebtables/402-parker-dhcp-renew).
+	if not util.check_output("ebtables-tiny -L PARKER_DHCP"):find("DROP") then
+		os.execute("ebtables-tiny -A PARKER_DHCP -j DROP")
+	end
+	if util.read_file("/tmp/parker_online") == nil then
+		os.execute("touch /tmp/parker_online")
+		return true
+	end
+	return false
+end
+
+local function configure_client()
+	-- Stage the uci settings to stop routing. Returns the old client
+	-- address (see parker/dhcpnak.lua), and whether the radvd and the CLAT
+	-- configuration were deleted.
+	state.routing = "inactive"
+	local nak_cidr = nil
+	local radvd_config_deleted = false
+	local xlat_config_deleted = false
+
+	if uci.get("network", DHCP_IFACE, "proto") == "static" then
+		nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
+		-- Router lifetime 0 only when a new router is there, see
+		-- parker/ragoodbye.lua.
+		ragoodbye.send()
+	end
+	uci_set("network", DHCP_IFACE, "proto", "dhcp")
+	-- dnsmasq stops its DHCPD-job when the interface is not 'proto static'
+
+	uci_delete("network", DHCP_IFACE, "ipaddr")
+	uci_delete("network", DHCP_IFACE, "ip6addr")
+	uci_delete("network", DHCP_IFACE, "xlat_range6")
+	uci_set("network", "client6", "proto", "dhcpv6")
+
+	uci_set("network", "gluon_bat0", "gw_mode", "client")
+
+	if util.read_file("/tmp/range6") ~= nil then
+		os.execute("rm /tmp/range6 -f")
+		os.execute("rm /tmp/addr6 -f")
+		radvd_config_deleted = true
+	end
+	if util.read_file("/tmp/xlat_range6") ~= nil then
+		os.execute("rm /tmp/xlat_range6 -f")
+		xlat_config_deleted = true
+	end
+
+	os.execute("ebtables-tiny -F PARKER_RADV")
+	os.execute("ebtables-tiny -F PARKER_DHCP")
+	return nak_cidr, radvd_config_deleted, xlat_config_deleted
+end
+
 local function apply_network(conf, target_state, address4, mtu)
 	if uci.get("dhcp", DHCP_IFACE) == nil then
 		uci_set("dhcp", DHCP_IFACE, "dhcp")
 	end
 
+	local first_time_active_since_boot = false
+	local nak_cidr = nil
 	local radvd_config_deleted = false
 	local xlat_config_deleted = false
-	local first_time_active_since_boot = false
 	local dhcp_options_changed = false
-	-- Our client address while we routed for the clients, see parker/dhcpnak.lua.
-	local nak_cidr = nil
-
 	if target_state == true then
-		dhcpnak.stop()
-		ragoodbye.cancel()
-		util.log("network: routing state: active")
-		local prefix_len = tonumber(util.str_split(conf.range4, "[^/]+")[2])
-		-- Offset 1 is our own address and the last one is the broadcast
-		-- address, so the pool runs from offset 2 to the one before the
-		-- broadcast address.
-		local start = 2
-		local limit = limits.pool(conf.range4)
-		local prefix6_len = tonumber(util.str_split(conf.range6, "[^/]+")[2])
-
-		if address4 ~= conf.address4 then
-			-- We have moved out of the way of another node, so the block of
-			-- addresses we may move to has to stay out of the pool. The end
-			-- of the pool stays where it is for everybody.
-			start = clientaddr.RESERVED + 1
-			limit = limit - (start - 2)
-		end
-
-		uci_set("dhcp", DHCP_IFACE, "interface", DHCP_IFACE)
-		-- Short leases: after a gateway change, a client of the old uplink
-		-- asks again after 1 min at the latest (see parker/dhcpnak.lua).
-		-- 2m is the minimum of dnsmasq.
-		uci_set("dhcp", DHCP_IFACE, "leasetime", "2m")
-		uci_set("dhcp", DHCP_IFACE, "start", start)
-		uci_set("dhcp", DHCP_IFACE, "limit", limit)
-		uci_set("dhcp", DHCP_IFACE, "force", "1")
-		util.log("Configuring DHCPD on " .. DHCP_IFACE .. " with up to " .. limit .. " leases")
-
-		uci_set("network", DHCP_IFACE, "proto", "static")
-		uci_set("network", DHCP_IFACE, "ipaddr", address4 .. "/" .. prefix_len)
-		util.log(DHCP_IFACE .. " ipaddr: " .. address4 .. "/" .. prefix_len)
-		uci_set("network", DHCP_IFACE, "ip6addr", conf.address6 .. "/" .. prefix6_len)
-		util.log(DHCP_IFACE .. " ip6addr: " .. conf.address6 .. "/" .. prefix6_len)
-		if conf.xlat_range6 then
-			uci_set("network", DHCP_IFACE, "xlat_range6", conf.xlat_range6)
-			util.log(DHCP_IFACE .. " xlat_range6: " .. conf.xlat_range6)
-		end
-		uci_set("network", "client6", "proto", "static")
-		uci_set("network", "gluon_bat0", "gw_mode", "server")
-		if not util.check_output("ebtables-tiny -L PARKER_RADV"):find("DROP") then
-			os.execute("ebtables-tiny -A PARKER_RADV -j DROP")
-		end
-		-- Our clients must not renew a lease of another uplink (see
-		-- /lib/gluon/ebtables/402-parker-dhcp-renew).
-		if not util.check_output("ebtables-tiny -L PARKER_DHCP"):find("DROP") then
-			os.execute("ebtables-tiny -A PARKER_DHCP -j DROP")
-		end
-		if util.read_file("/tmp/parker_online") == nil then
-			os.execute("touch /tmp/parker_online")
-			first_time_active_since_boot = true
-		end
+		first_time_active_since_boot = configure_routing(conf, address4)
 	else
-		-- target_state == false
-		util.log("network: routing state: inactive")
-
-		if uci.get("network", DHCP_IFACE, "proto") == "static" then
-			nak_cidr = uci.get("network", DHCP_IFACE, "ipaddr")
-			-- Router lifetime 0 only when a new router is there, see
-			-- parker/ragoodbye.lua.
-			ragoodbye.send()
-		end
-		uci_set("network", DHCP_IFACE, "proto", "dhcp")
-		-- dnsmasq stops its DHCPD-job when the interface is not 'proto static'
-
-		uci_delete("network", DHCP_IFACE, "ipaddr")
-		uci_delete("network", DHCP_IFACE, "ip6addr")
-		uci_delete("network", DHCP_IFACE, "xlat_range6")
-		uci_set("network", "client6", "proto", "dhcpv6")
-
-		uci_set("network", "gluon_bat0", "gw_mode", "client")
-
-		if util.read_file("/tmp/range6") ~= nil then
-			os.execute("rm /tmp/range6 -f")
-			os.execute("rm /tmp/addr6 -f")
-			radvd_config_deleted = true
-		end
-		if util.read_file("/tmp/xlat_range6") ~= nil then
-			os.execute("rm /tmp/xlat_range6 -f")
-			xlat_config_deleted = true
-		end
-
-		os.execute("ebtables-tiny -F PARKER_RADV")
-		os.execute("ebtables-tiny -F PARKER_DHCP")
+		nak_cidr, radvd_config_deleted, xlat_config_deleted = configure_client()
 	end
 
 	local changed = sections_changed()
@@ -698,18 +699,22 @@ local function apply_network(conf, target_state, address4, mtu)
 	return true
 end
 
--- Multi-site operation: parker-sites probes each site every second. When no
--- site is up, our tunnels may still have a recent handshake, but they do
--- not route. Only trust a status that parker-sites has written recently.
-local SITES_STATUS = "/tmp/parker-sites/status"
-local SITES_STATUS_MAX_AGE = 30
-
-local function no_site_up()
-	local st = stat.stat(SITES_STATUS)
-	if not st or os.time() - st.st_mtime > SITES_STATUS_MAX_AGE then
-		return false
+local function remove_wg_default_routes(family)
+	local found = false
+	local output = util.check_output("ip " .. family .. " r show")
+	for line in string.gmatch(output, "[^\n]+") do
+		if string.find(line, "default via") then
+			if string.find(line, "wg_") then
+				for gw in string.gmatch(line, "via%s+(%S+)") do
+					if not found then
+						util.log("No active tunnels. Removing default routes via wg_x.")
+					end
+					found = true
+					os.execute("ip " .. family .. " r del default via " .. gw)
+				end
+			end
+		end
 	end
-	return (util.read_file(SITES_STATUS) or ""):find("\nactive=nil\n", 1, true) ~= nil
 end
 
 local function update(report)
@@ -728,18 +733,9 @@ local function update(report)
 		util.log("Applied the client limits to the kernel (event mode: " .. tostring(active) .. ")")
 	end
 
-	local active = {}
-
-	for _, elem in ipairs(get_handshake_ages()) do
-		if elem[1] < 180 then
-			table.insert(active, elem[2])
-		end
-	end
-
-	if #active > 0 and no_site_up() then
-		util.log("parker-sites: no site is up")
-		active = {}
-	end
+	local active, no_site_up = tunnels.active()
+	state.tunnels = table.concat(active, " ")
+	state.no_site_up = no_site_up
 
 	local conf_json = util.read_file(CONFIG_FILE)
 	local conf = nil
@@ -757,7 +753,6 @@ local function update(report)
 	-- otherwise this function will simply to nothing
 	local note = ""
 	if #active == 0 then
-		util.log("No active tunnels. Deactivating")
 		apply_network(conf, false)
 	else
 		if conf == nil then
@@ -771,7 +766,6 @@ local function update(report)
 		if address4 ~= conf.address4 then
 			note = " (client ip " .. address4 .. ")"
 		end
-		util.log(#active .. " active tunnels: Applying network state.")
 		-- In event mode the client network is larger than the announced
 		-- range4 (same base, see parker/limits.lua). clientaddr keeps the
 		-- announced range, so a moved address stays valid.
@@ -786,10 +780,6 @@ local function update(report)
 	local current = get_wg_routes()
 	assert(#current <= 1, "too many current routes")
 	current = current[1]
-	if current then
-		util.log("Currently " .. current.iface .. " is the selected tunnel")
-	end
-	util.log("There are " .. #active .. " active tunnels")
 	if current and util.has_value(active, current.iface) then
 		if current.mtu ~= route_mtu4 then
 			-- The tunnels have been resized under us, so what our clients
@@ -807,38 +797,18 @@ local function update(report)
 		if client_conc ~= nil then
 			set_client_route(current.iface, client_conc)
 		end
-		util.log("current route still active. Doing nothing.")
+		state.route = current.iface
 		report:write("active (idle) via " .. current.iface .. note)
 		return
 	end
 	if current then
-		util.log("The current route is on an inactive tunnel. Going to reconfigure")
+		util.log("The current route via " .. current.iface .. " is on an inactive tunnel. Going to reconfigure")
 	end
 
 	if #active == 0 then
-		util.log("No active tunnels. Removing default routes via wg_x.")
 		os.remove(ROUTE4_FILE)
-		local ip4route = util.check_output("ip -4 r show")
-		for line in string.gmatch(ip4route, "[^\n]+") do
-			if string.find(line, "default via") then
-				if string.find(line, "wg_") then
-					for gw in string.gmatch(line, "via%s+(%S+)") do
-						os.execute("ip -4 r del default via " .. gw)
-					end
-				end
-			end
-		end
-
-		local ip6route = util.check_output("ip -6 r show")
-		for line in string.gmatch(ip6route, "[^\n]+") do
-			if string.find(line, "default via") then
-				if string.find(line, "wg_") then
-					for gw in string.gmatch(line, "via%s+(%S+)") do
-						os.execute("ip -6 r del default via " .. gw)
-					end
-				end
-			end
-		end
+		remove_wg_default_routes("-4")
+		remove_wg_default_routes("-6")
 		os.execute("ip -6 r del default table " .. CLIENT_TABLE .. " proto " .. RT_PROTO .. " 2>/dev/null")
 		report:write("inactive")
 		return
@@ -857,6 +827,7 @@ local function update(report)
 		end
 		if configured then
 			util.log("Route activated")
+			state.route = act
 			report:write("active" .. note)
 			break
 		else
@@ -866,9 +837,31 @@ local function update(report)
 	end
 end
 
-util.log("Starting up")
+local function log_state()
+	-- Log one line when the state is not the same as in the last cycle.
+	-- A cycle that does not configure the network has no state.
+	if state.routing == nil then
+		return
+	end
+	local line = "state: routing " .. state.routing
+	if state.no_site_up then
+		line = line .. ", no site up"
+	elseif state.tunnels == "" then
+		line = line .. ", no usable tunnels"
+	else
+		line = line .. ", tunnels " .. state.tunnels .. ", route via " .. (state.route or "none")
+	end
+	if state.client then
+		line = line .. ", client " .. state.client
+	end
+	if util.read_file(STATE_FILE) ~= line then
+		util.write_file(STATE_FILE, line)
+		util.log(line)
+	end
+end
+
 local report = io.open("/tmp/nodeconfig-report.tmp", "w")
 update(report)
+log_state()
 report:close()
 os.execute("mv /tmp/nodeconfig-report.tmp /tmp/nodeconfig-report")
-util.log("Done")

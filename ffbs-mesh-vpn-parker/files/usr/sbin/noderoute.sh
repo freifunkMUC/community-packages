@@ -6,12 +6,6 @@ tmpdir=/tmp/ff-Ohb0ba0u/
 config_file="${tmpdir}noderoute.json"
 cycle_stamp="${tmpdir}noderoute-cycle"
 
-# A tunnel counts as usable while its last handshake is younger than this.
-# Keep in sync with noderoute.lua.
-HANDSHAKE_MAX_AGE=180
-# parker-sites (multi-site operation) and how old its status may be.
-sites_status=/tmp/parker-sites/status
-SITES_STATUS_MAX_AGE=30
 # Shortest possible time between two cycles.
 CYCLE_SLEEP=10
 # How much longer we idle at the end of a cycle if nothing happens.
@@ -29,6 +23,8 @@ BATMAN_POLL_SLEEP=10
 
 LOGGER="logger -s -t noderoute.sh"
 $LOGGER Starting up.
+# Make the first cycle of noderoute.lua log its state.
+rm -f "${tmpdir}noderoute-state"
 
 # The set of usable tunnels the running configuration is based on.
 tunnels=""
@@ -69,21 +65,9 @@ recover_batman() {
 	done
 }
 
-no_site_up() {
-	# Multi-site operation: parker-sites finds no site up. Keep in sync
-	# with noderoute.lua.
-	[ -f "$sites_status" ] && grep -qx 'active=nil' "$sites_status" &&
-		[ $(($(date +%s) - $(date -r "$sites_status" +%s))) -le "$SITES_STATUS_MAX_AGE" ]
-}
-
 active_tunnels() {
-	# The wg-interfaces with a recent handshake, i.e. the tunnels
-	# noderoute.lua considers usable.
-	wg show all latest-handshakes |
-		awk -v max_age="$HANDSHAKE_MAX_AGE" '$3 > 0 && systime() - $3 < max_age { printf "%s ", $1 }'
-	if no_site_up; then
-		printf "no-site-up"
-	fi
+	# The tunnels noderoute.lua can use, see parker/tunnels.lua.
+	lua -e 'io.write(require("parker.tunnels").key())'
 }
 
 new_config() {
@@ -127,7 +111,6 @@ if [ "$(uci -q get gluon.mesh_vpn.enabled)" = 1 ]; then
 fi
 
 while true; do
-	$LOGGER Cycling
 	touch "$cycle_stamp"
 	tunnels="$(active_tunnels)"
 	if ! lua /usr/share/lua/noderoute.lua $tmpdir ; then
