@@ -34,6 +34,13 @@ local IPV6_ONLY_OPTION = "option:ipv6-only"
 -- use on the network it has just been given an address on.
 local MTU_OPTION = "option:mtu"
 
+-- DHCPv4 option 114 (RFC 8910), the URI of the captive portal API.
+local CAPTIVE_PORTAL_OPTION = "114"
+
+-- Where uradvd picks up the captive portal URI for the RA option 37
+-- (RFC 8910), see /lib/gluon/radvd/arguments.
+local CAPTIVE_PORTAL_FILE = "/tmp/captive_portal"
+
 -- What the CLAT adds to an IPv4 packet of a client: 20 bytes between the
 -- IPv4 and the IPv6 header, plus the 8 bytes of the fragment header a
 -- translator has to insert for a packet that may still be fragmented
@@ -568,6 +575,26 @@ local function apply_network(conf, target_state, address4, mtu)
 		changed = true
 	end
 
+	-- The captive portal URI of the config service (captive_portal_url).
+	-- Without it, the node sends no DHCPv4 option 114 and no RA option 37.
+	-- uradvd only reads the file when it starts, as /tmp/pref64 below.
+	local captive_portal = nil
+	if target_state and conf ~= nil and conf.captive_portal_url ~= nil then
+		captive_portal = dhcp.captive_portal_url(conf.captive_portal_url)
+		if captive_portal == nil then
+			util.log("Ignoring invalid captive_portal_url from the config service")
+		end
+	end
+	local captive_portal_changed = false
+	if util.read_file(CAPTIVE_PORTAL_FILE) ~= captive_portal then
+		if captive_portal ~= nil then
+			util.write_file(CAPTIVE_PORTAL_FILE, captive_portal)
+		else
+			os.execute("rm " .. CAPTIVE_PORTAL_FILE .. " -f")
+		end
+		captive_portal_changed = true
+	end
+
 	-- A node that translates IPv4 for its clients announces the NAT64 prefix
 	-- in its router advertisements (RFC 8781), so clients can translate for
 	-- themselves as well. uradvd only reads /tmp/pref64 when it starts, so
@@ -616,7 +643,7 @@ local function apply_network(conf, target_state, address4, mtu)
 	-- leave the clients without router advertisements.
 	local range6 = util.read_file("/tmp/range6")
 	if (target_state and range6 ~= conf.range6) or radvd_config_deleted
-			or pref64_changed or adv_mtu_changed or radvd_stopped then
+			or pref64_changed or adv_mtu_changed or captive_portal_changed or radvd_stopped then
 		if target_state and conf.range6 ~= nil then
 			util.write_file("/tmp/range6", conf.range6)
 			util.write_file("/tmp/addr6", conf.address6)
@@ -660,6 +687,15 @@ local function apply_network(conf, target_state, address4, mtu)
 			util.log("Announcing IPv6-only Preferred to our clients")
 		else
 			util.log("No longer announcing IPv6-only Preferred to our clients")
+		end
+	end
+
+	if set_client_option(CAPTIVE_PORTAL_OPTION, { captive_portal }) then
+		dhcp_options_changed = true
+		if captive_portal ~= nil then
+			util.log("Announcing captive portal " .. captive_portal .. " to our clients")
+		else
+			util.log("No longer announcing a captive portal to our clients")
 		end
 	end
 

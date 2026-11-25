@@ -35,6 +35,20 @@ function dhcp.ipv4_addresses(addrs)
 	return result
 end
 
+-- The captive portal API URI (RFC 8908) for DHCPv4 option 114, or nil.
+-- Only an https URI with no comma, space, quote or '#': dnsmasq splits
+-- the option value at commas, and its config file must stay one line.
+-- A DHCP option holds at most 255 bytes.
+function dhcp.captive_portal_url(url)
+	if type(url) ~= 'string' or #url > 255 then
+		return nil
+	end
+	if not url:match('^https://[%w%-%._~:/%?@!%$&%*%+;=%%%[%]]+$') then
+		return nil
+	end
+	return url
+end
+
 -- A dhcp_option list in which one option carries the given values, and
 -- everybody else's entries are where they were. Without values the
 -- option is dropped, cleaning up after whoever has stopped configuring

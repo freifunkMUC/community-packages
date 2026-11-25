@@ -399,7 +399,8 @@ Config service
 
     GET http://<config_server>/config?pubkey=<wg pubkey>&nonce=<nonce>
         &v6mtu=<WAN IPv6 MTU>&version=<gluon release>
-        [&preferred_site=<name>][&tc_ingress=<kbit/s>&tc_egress=<kbit/s>]
+        [&preferred_site=<name>][&domain=<gluon domain>]
+        [&tc_ingress=<kbit/s>&tc_egress=<kbit/s>]
 
 The answer is a JSON object. The last line is the usign signature with
 `config_pubkey`. The node does not use a config with a bad signature or a
@@ -427,6 +428,7 @@ Optional fields. Without them, the node operates as before:
 | :------------- | :---------------------------------------------------------- |
 | `xlat_range6`  | 464XLAT mode. The IPv6 range that the CLAT (`ffmuc-ebpf-clat`) translates the IPv4 clients into. The node allows only IPv6 on the tunnels, sends DHCPv4 option 108 and announces the NAT64 prefix `64:ff9b::/96` (PREF64). |
 | `primary_site` | Multi-site operation. The name of the preferred site.        |
+| `captive_portal_url` | Captive portal API URI (RFC 8908). The node sends it in DHCPv4 option 114 and in RA option 37 (RFC 8910). RA option 37 needs uradvd with `--captive-portal` and the site patch that passes `/tmp/captive_portal` to uradvd. Only `https://` URIs without a comma, space, quote or `#`, at most 255 bytes. Without the field, the node sends neither option. |
 | `sites`        | Multi-site operation. One object for each site name (see below). |
 
 Fields of each entry in `sites`:
