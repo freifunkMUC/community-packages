@@ -12,6 +12,8 @@ static void sig_int(int signo)
 }
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args) {
+	if (level != LIBBPF_WARN)
+		return 0;
 	return vfprintf(stderr, format, args);
 }
 
@@ -79,10 +81,8 @@ int main(int argc, char **argv) {
 	printf("Successfully started! Please run `sudo cat /sys/kernel/debug/tracing/trace_pipe` "
 				 "to see output of the BPF program.\n");
 
-	while (!exiting) {
-		fprintf(stderr, ".");
+	while (!exiting)
 		sleep(1);
-	}
 
 	ingress_tc_opts.flags = ingress_tc_opts.prog_fd = ingress_tc_opts.prog_id = 0;
 	err = bpf_tc_detach(&ingress_hook, &ingress_tc_opts);
