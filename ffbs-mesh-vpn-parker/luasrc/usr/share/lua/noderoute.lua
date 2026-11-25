@@ -551,7 +551,8 @@ local function apply_network(conf, target_state, address4, mtu)
 	end
 
 	if nak_cidr ~= nil then
-		dhcpnak.start(nak_cidr)
+		-- The same rule as for clientaddr.select() in update().
+		dhcpnak.start(nak_cidr, conf ~= nil and conf.xlat_range6 ~= nil)
 	end
 
 	local dnsmasq_limits_changed, lease_range4, lease_max = apply_dnsmasq_limits(conf, target_state)
@@ -760,9 +761,13 @@ local function update(report)
 			report:write("no-config")
 			return
 		end
-		-- Only a node that routes for its clients claims an address on the
-		-- client network, and only that one can be in the way of another.
-		local address4 = clientaddr.select(conf, tmpdir)
+		-- Only with 464XLAT can the config service give all nodes the same
+		-- range4, because the client IPv4 then does not leave the node.
+		-- Only then can the address4 of another node be the same as ours.
+		local address4 = conf.address4
+		if conf.xlat_range6 ~= nil then
+			address4 = clientaddr.select(conf, tmpdir)
+		end
 		if address4 ~= conf.address4 then
 			note = " (client ip " .. address4 .. ")"
 		end

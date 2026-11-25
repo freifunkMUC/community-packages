@@ -10,12 +10,22 @@
 -- dnsmasq sends a DHCPNAK for an address in a "static" range that it has not
 -- assigned, and it ignores a DHCPDISCOVER for such a range.
 --
--- All uplinks get the same client address from the config service. When
--- another node uses the address (an uplink that has become active), we must
--- not hold it: two nodes would answer ARP for the router of the clients, and
--- our dnsmasq would NAK the requests for the other node. We thus do not start,
--- and we stop at the next check, when batman-adv has seen another node with
--- the address (see clientaddr.lua).
+-- dnsmasq is not authoritative here (see 905-dhcp-not-authoritative). An
+-- authoritative dnsmasq also sends a DHCPNAK to a DHCPREQUEST in SELECTING
+-- state for another server, against RFC 2131 4.3.2. Thus a client of an
+-- active uplink can lose the lease that it is about to get. Without it,
+-- dnsmasq NAKs a renewal per unicast, and a rebinding or INIT-REBOOT for a
+-- lease in its lease file. A rebinding for a lease that it does not know
+-- gets no answer: that client waits until its lease (2 min) ends.
+--
+-- With 464XLAT, the config service can give all uplinks the same client
+-- address (see clientaddr.lua). When another node uses the address (an
+-- uplink that has become active), we must not hold it: two nodes would
+-- answer ARP for the router of the clients, and our dnsmasq would NAK the
+-- requests for the other node. In this case only, we do not start, and we
+-- stop at the next check, when batman-adv has seen another node with the
+-- address. Without 464XLAT, each node has its own range4, and we always
+-- hold the address for HOLD seconds.
 
 local clientaddr = require("clientaddr")
 local util = require("util")
@@ -76,20 +86,21 @@ local function set_conf(content)
 end
 
 -- Start to NAK the renewals for the client network of cidr, our old client
--- address with its prefix length.
-function dhcpnak.start(cidr)
+-- address with its prefix length. shared: other nodes can have the same
+-- address (464XLAT).
+function dhcpnak.start(cidr, shared)
 	local addr, net, mask = dhcpnak.parse(cidr)
 	if not addr then
 		return false
 	end
-	local claim = clientaddr.claim(addr)
+	local claim = shared and clientaddr.claim(addr)
 	if claim then
 		util.log("DHCP: " .. addr .. " is in use by " .. claim .. ". No DHCPNAK.")
 		return false
 	end
 	os.execute("ip addr replace " .. addr .. "/32 dev " .. IFACE)
-	set_conf("dhcp-authoritative\ndhcp-range=set:parker-nak," .. net .. ",static," .. mask .. "\n")
-	util.write_file(STATE_FILE, addr .. " " .. os.time())
+	set_conf("dhcp-range=set:parker-nak," .. net .. ",static," .. mask .. "\n")
+	util.write_file(STATE_FILE, addr .. " " .. os.time() .. (shared and " shared" or ""))
 	util.log("DHCP: sending DHCPNAK to the clients of " .. addr .. " for " .. dhcpnak.HOLD .. "s")
 	return true
 end
@@ -108,19 +119,19 @@ function dhcpnak.stop()
 	util.log("DHCP: no more DHCPNAK for the clients of " .. tostring(addr))
 end
 
--- Stop after HOLD seconds, or when another node uses the address.
+-- Stop after HOLD seconds, or when another node uses a shared address.
 function dhcpnak.expire()
 	local state = util.read_file(STATE_FILE)
 	if not state then
 		return
 	end
-	local addr, since = state:match("^(%S+) (%d+)")
+	local addr, since, flag = state:match("^(%S+) (%d+) ?(%S*)")
 	since = tonumber(since)
 	if not since or os.time() - since >= dhcpnak.HOLD then
 		dhcpnak.stop()
 		return
 	end
-	local claim = clientaddr.claim(addr)
+	local claim = flag == "shared" and clientaddr.claim(addr)
 	if claim then
 		util.log("DHCP: " .. addr .. " is in use by " .. claim)
 		dhcpnak.stop()

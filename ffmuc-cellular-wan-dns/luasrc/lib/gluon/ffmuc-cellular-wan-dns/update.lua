@@ -2,7 +2,7 @@
 
 local RESOLV_CONF = '/var/gluon/wan-dnsmasq/resolv.conf'
 local MARKER = '# ffmuc-cellular-wan-dns fallback\n'
-local CELLULAR = { 'cellular', 'cellular_4', 'cellular_6' }
+local CELLULAR = { 'cellular', 'cellular_4' }
 
 
 local stat = require 'posix.sys.stat'

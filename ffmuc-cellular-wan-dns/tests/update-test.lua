@@ -10,7 +10,7 @@
 local dir = arg[0]:match('^(.*)/tests/[^/]*$') or '.'
 local SCRIPT = dir .. '/luasrc/lib/gluon/ffmuc-cellular-wan-dns/update.lua'
 local GLUON_UPDATE = arg[1]
-local INTERFACE_D = { 'wan', 'wan6', 'cellular', 'cellular_4', 'cellular_6' }
+local INTERFACE_D = { 'wan', 'wan6', 'cellular', 'cellular_4' }
 local RESOLV = '/var/gluon/wan-dnsmasq/resolv.conf'
 
 local FALLBACK = '# ffmuc-cellular-wan-dns fallback\n'
@@ -184,14 +184,13 @@ check('cellular_4 servers are kept', files[RESOLV] == 'nameserver 192.0.2.53\nna
 	files[RESOLV])
 check('script does not call update.lua', executed == 0)
 
--- 2. IPv6 DNS on the parent 'cellular' and on 'cellular_6'.
+-- 2. IPv6 DNS on the parent 'cellular'.
 reset()
 iface('cellular', true, { '2001:db8::53' })
-iface('cellular_6', true, { 'fe80::1' }, 'wwan0')
+iface('cellular_4', true, {})
 run_gluon_hotplug()
 run_script()
-local want = 'nameserver 2001:db8::53\nnameserver fe80::1' .. (GLUON_UPDATE and '%wwan0' or '') .. '\n'
-check('cellular and cellular_6 servers are kept', files[RESOLV] == want, files[RESOLV])
+check('cellular servers are kept', files[RESOLV] == 'nameserver 2001:db8::53\n', files[RESOLV])
 
 -- 3. Cellular is up, but no interface reports DNS: write the fallback list.
 reset()

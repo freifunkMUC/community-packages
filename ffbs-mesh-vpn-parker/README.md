@@ -79,10 +79,14 @@ The node gives leases of 2 minutes to its clients. A client renews its lease aft
 
 When the node stops routing for its clients, it keeps its old client address for 150 seconds (`/32` on `br-client`).
 In this time, dnsmasq answers each renewal with a DHCPNAK and ignores each DHCPDISCOVER.
+dnsmasq stays not authoritative in this time. An authoritative dnsmasq also NAKs a DHCPREQUEST in SELECTING state for another server (against RFC 2131 4.3.2), and the clients of an active uplink then lose their new lease.
+Thus a broadcast rebinding for a lease that is not in the lease file gets no DHCPNAK. Such a client waits until its lease ends (at most 2 minutes).
 The client then gets a new lease from an active uplink.
 Without the DHCPNAK, the client keeps the old uplink as its router until the lease runs out.
-The node does not keep the address when batman-adv has seen another node with this address in the last 60 seconds (an uplink that has become active with the same address).
+With 464XLAT (`xlat_range6`), other uplinks can have the same client address (see "Client addresses").
+Then the node does not keep the address when batman-adv has seen another node with this address in the last 60 seconds (an uplink that has become active with the same address).
 It does a check at each `noderoute` cycle (at most 30 seconds apart).
+Without 464XLAT, the address belongs only to this node, and the node keeps it for the full 150 seconds.
 
 A client of an active node can still have a lease of another uplink, for example from the time when the node was a gateway client.
 The client renews this lease per unicast through the mesh, and the other uplink stays its IPv4 router.
@@ -99,6 +103,7 @@ The node does not change an address for this. Thus no two nodes use the same add
 `tests/dhcp-renew-test.sh` (in the package directory) tests the chain with the kernel bridge (see the script for the command).
 
 The code is in `/usr/share/lua/parker/dhcpnak.lua`.
+`lua5.1 tests/dhcpnak-test.lua` tests the hold with and without 464XLAT.
 
 IPv6 after a gateway change
 ---------------------------
@@ -237,13 +242,18 @@ The code is in `parker/limits.lua`.
 Client addresses
 ----------------
 
-The config service hands the same `range4` and the same `address4` to every
-node, so all the nodes that mesh with each other claim the same address on
-the client network they share. A node that finds another one using its
-address therefore moves to one of the first 16 addresses of `range4`, chosen
-from its own MAC, and remembers that in `parker.client.address4` until the
-config service gives it a different range. Nodes that have moved keep that
-block of addresses out of the DHCP pool they hand to their clients.
+Without `xlat_range6`, the node always uses `address4` of the config
+service. Each node routes its own `range4`, so no other node uses this
+address.
+
+With `xlat_range6` (464XLAT), the client IPv4 does not leave the node. The
+config service can then give the same `range4` and `address4` to all nodes.
+Nodes that mesh with each other then use the same address on the shared
+client network. A node that finds another node with its address moves to
+one of the first 16 addresses of `range4`. It selects the address from its
+own MAC and keeps it in `parker.client.address4` until the config service
+gives a different range. A node that has moved keeps these 16 addresses out
+of its DHCP pool. The code is in `/usr/share/lua/clientaddr.lua`.
 
 MTU
 ---
@@ -469,8 +479,6 @@ parker = {
 
         -- optional
         client_ntp_servers4 = { "198.51.100.123" },
-        unifi_controller4 = "198.51.100.10",
-        omada_controllers4 = { "198.51.100.11" },
         disable_client_snooping = false,
 },
 ```
@@ -483,20 +491,8 @@ configures the node's own clock.
 When it is unset, a single IPv4 address in `ntp_servers` is passed on to
 clients instead.
 
-`unifi_controller4` and `omada_controllers4` tell the access points an
-operator hangs off the client network where to find their controller, so
-that they can be adopted without the controller sharing their broadcast
-domain. Both take IPv4 addresses only.
-
-A UniFi access point learns `unifi_controller4` from suboption 1 of the
-vendor-specific DHCPv4 option 43. Only clients whose vendor class says
-`ubnt` are sent that option, so the address stays invisible to everyone
-else on the client network.
-
-Omada access points learn `omada_controllers4` from DHCPv4 option 138,
-the CAPWAP access controller list of RFC 5417, which takes more than one
-address. Nothing identifies an Omada access point before it is adopted,
-so this one is handed to every client that asks for option 138.
+The UniFi and Omada controller options are in the package
+`ffmuc-dhcp-ap-controllers`.
 
 Multicast snooping
 ------------------

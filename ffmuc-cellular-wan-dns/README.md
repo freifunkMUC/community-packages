@@ -2,7 +2,7 @@ ffmuc-cellular-wan-dns
 ======================
 
 This package keeps DNS for gluon-wan-dnsmasq on nodes with a Gluon
-cellular uplink (`cellular`, `cellular_4`, `cellular_6`).
+cellular uplink (`cellular`, `cellular_4`).
 
 gluon-wan-dnsmasq resolves names for the node itself, for example the
 config server of Parker. It takes its servers from the uplinks in
@@ -12,9 +12,6 @@ its server file is empty and name resolution fails.
 Function
 --------
 
-* The package adds `cellular_6` to `interface.d`. Gluon adds only
-  `cellular` and `cellular_4`. The ncm proto handler sends IPv6 DNS on
-  `cellular_6`.
 * The hotplug script `51-ffmuc-cellular-wan-dns` runs after
   `50-gluon-wan-dnsmasq` for the same interfaces.
 * When a cellular interface is up and no uplink reports a DNS server, the
@@ -45,8 +42,9 @@ Related fixes
 
 * `ffbs-mesh-vpn-parker` sets `ip4table 1` on `cellular`. Without it,
   Parker cannot send DNS queries to IPv4 servers on the cellular uplink.
-* The OpenWrt qmi proto handler drops the DNS servers when `peerdns` is
-  `0`. Gluon sets `peerdns 0`. A firmware patch fixes this.
+* On OpenWrt 24.10, the qmi and mbim proto handlers drop the DNS servers
+  when `peerdns` is `0`. Gluon sets `peerdns 0`. A firmware patch fixes
+  this. openwrt/openwrt#21314 fixes it in newer OpenWrt.
 
 Tests
 -----
