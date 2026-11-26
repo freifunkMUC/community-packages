@@ -24,6 +24,8 @@
 --   * Carry (parker/carry.lua): while rx of the current pgw grows by 48 KB
 --     in 3 s, a missed probe of a site that is up is not counted, for at
 --     most 30 s after the last answer. The probe then waits up to 3 s.
+--     While the active site carries, this also applies to the other sites
+--     that are up (the WAN is shared).
 --   * The active site is the primary site while it is up, else the first
 --     site that is up.
 --
@@ -405,7 +407,8 @@ end
 -- One step of the health state machine of a site. st is changed in place.
 -- ok: the probe of this tick answered. wg: { peer, ts } of the tunnel.
 -- rx: { peer, rx } of the tunnel. late: a late reply of an earlier probe.
-local function health(name, site, iface, st, now, ok, wg, rx, late, senderr)
+-- shared: the tunnel of the active site carries.
+local function health(name, site, iface, st, now, ok, wg, rx, late, senderr, shared)
 	local pgws = site.pgws or {}
 	local current = wg and wg.peer
 	local pgw = current and find_by(pgws, "pubkey", current)
@@ -424,7 +427,7 @@ local function health(name, site, iface, st, now, ok, wg, rx, late, senderr)
 	else
 		st.senderr_since = nil
 	end
-	verdict = verdict or carry.judge(st.carry, T, now, ok, late, st.state == "up")
+	verdict = verdict or carry.judge(st.carry, T, now, ok, late, st.state == "up", shared)
 	if verdict == "hit" then
 		st.hits, st.misses = st.hits + 1, 0
 	elseif verdict == "miss" then
@@ -879,10 +882,14 @@ local function tick(db)
 		end
 	end
 
+	local function carries(st)
+		return st ~= nil and st.state == "up" and st.carry ~= nil and carry.active(st.carry, T)
+	end
+	local shared = carries(db.sites[db.active or ""])
 	local busy = {}
 	for _, name in ipairs(names) do
 		local st, i_name = db.sites[name], iface[name]
-		if i_name and targets[i_name] and st.state == "up" and st.carry and carry.active(st.carry, T) then
+		if i_name and targets[i_name] and st.state == "up" and (shared or carries(st)) then
 			busy[i_name] = true
 		end
 	end
@@ -897,7 +904,7 @@ local function tick(db)
 		if iface[name] then
 			local i_name = iface[name]
 			health(name, conf.sites[name], i_name, st, now, ok[i_name], wg[i_name], rx[i_name], late[i_name],
-				senderr[i_name])
+				senderr[i_name], shared)
 		elseif st.state == "up" then
 			st.state, st.since = "down", now
 			log("site " .. name .. " is down (no tunnel)")
@@ -961,7 +968,7 @@ local function tick(db)
 			.. " pgw=" .. tostring(st.pgw) .. " hits=" .. st.hits .. " misses=" .. st.misses
 			.. " tried=" .. st.tried .. " fresh=" .. tostring(st.fresh)
 			.. " penalty=" .. tostring(st.penalty_until > now)
-			.. " carry=" .. tostring(st.carry ~= nil and carry.active(st.carry, T))
+			.. " carry=" .. (carries(st) and "true" or (shared and st.state == "up") and "shared" or "false")
 			.. " carried=" .. (st.carried or 0)
 			.. " senderrs=" .. (st.senderrs or 0)
 			.. " report=" .. (st.report and ("pending/" .. st.report.n) or "none")

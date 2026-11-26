@@ -17,6 +17,12 @@
 -- counted as a miss (and not as a hit). The probe then waits up to
 -- probe_wait_busy seconds for the reply; a late reply counts as an answer.
 -- When no answer came for carry_max seconds, misses count again.
+--
+-- A standby tunnel has no traffic of its own. While the tunnel of the
+-- active site carries, the shared WAN works, and a missed probe of a
+-- standby tunnel tells nothing about its pgw. Thus a standby tunnel of a
+-- site that is up uses the carry of the active site ("shared"), with the
+-- same carry_max limit.
 --   * Carry never makes a pgw or site up: only real hits do that.
 --   * A tunnel without traffic is not affected.
 --   * carry_bytes = 0 disables carry.
@@ -71,8 +77,8 @@ end
 
 -- The result of the probe of this tick: "hit", "miss" or "carry".
 -- ok: the reply of this tick came. late: a reply of an earlier tick came.
--- up: the site is up.
-function carry.judge(c, T, now, ok, late, up)
+-- up: the site is up. shared: the tunnel of the active site carries.
+function carry.judge(c, T, now, ok, late, up, shared)
 	if ok then
 		c.answer = now
 		return "hit"
@@ -80,7 +86,7 @@ function carry.judge(c, T, now, ok, late, up)
 	if late then
 		c.answer = now
 	end
-	if up and carry.active(c, T) and c.answer ~= nil and now - c.answer < T.carry_max then
+	if up and (shared or carry.active(c, T)) and c.answer ~= nil and now - c.answer < T.carry_max then
 		return "carry"
 	end
 	return "miss"

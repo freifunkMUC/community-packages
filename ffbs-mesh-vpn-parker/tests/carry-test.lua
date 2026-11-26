@@ -23,7 +23,8 @@ local function run(ticks, opts)
 		carry.sample(c, opts.peer and opts.peer(now) or "pgw01", rx, T)
 		local ok = opts.ok(now)
 		local late = opts.late and opts.late(now) or false
-		local v = carry.judge(c, T, now, ok, late, up)
+		local shared = opts.shared and opts.shared(now) or false
+		local v = carry.judge(c, T, now, ok, late, up, shared)
 		if v == "hit" then
 			hits, misses = hits + 1, 0
 		elseif v == "miss" then
@@ -93,6 +94,22 @@ check("carry counts no hits", hits == 19)
 check("peer change resets history", run(60, {
 	ok = after(20), rate = big, peer = function(now) return now < 20 and "pgw01" or "pgw02" end,
 }) == 22)
+
+-- Standby tunnel (no rx of its own) while the active tunnel carries
+-- ("shared"). Probes lost from tick 20 (bloat on the shared WAN).
+local active_carries = always(true)
+check("standby: late replies keep pgw while active carries", run(120, {
+	ok = after(20), shared = active_carries, late = function(now) return now >= 20 and now % 2 == 0 end,
+}) == nil)
+check("standby: misses count again after carry_max (dead pgw found)",
+	run(60, { ok = after(20), shared = active_carries }) == 19 + T.carry_max + 2)
+check("standby: misses count at once when active stops carrying",
+	run(60, { ok = after(20), shared = function(now) return now < 30 end }) == 32)
+check("standby: no effect when active does not carry", run(60, { ok = after(20), shared = always(false) }) == 22)
+check("standby: no shared carry on a down site", run(60, { ok = after(20), shared = active_carries, up = false }) == 22)
+check("standby: never answered, no shared carry", run(60, { ok = always(false), shared = active_carries }) == 3)
+local _, shits = run(40, { ok = after(20), shared = active_carries })
+check("standby: shared carry counts no hits", shits == 19)
 
 -- Counter reset (peer re-added): no negative delta, new history.
 local c = carry.new()
